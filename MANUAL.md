@@ -1,24 +1,24 @@
-# 2%SDinfo v1.6: Installation and User Manual
+# 2%SDinfo v1.7: Installation and User Manual
 
-For `2pctSDinfo_v1.6.py` on Windows 10/11. Tests micro SD cards and USB drives for real capacity, integrity, speed and stability, and recovers accidentally deleted files.
+For `2pctSDinfo_v1.7.py` on Windows 10/11. Tests micro SD cards and USB drives for real capacity, integrity, speed and stability, and recovers accidentally deleted files.
 
 ## 1. What you need
 
 - Windows 10 or 11
 - A micro SD card and a reader, or a USB drive
 - Python 3.9 or newer
-- `2pctSDinfo_v1.6.py`
+- `2pctSDinfo_v1.7.py`
 - A backup of the card before running the Full test
 
 ## 2. Installation
 
 1. **Check Python:** press Win+R, type `cmd`, run `python --version`. If it shows 3.9 or higher, skip to step 3.
 2. **Install Python:** download from python.org/downloads. On the first screen tick **Add python.exe to PATH**, click Install Now, then confirm with `python --version` in a new Command Prompt. Tkinter is included.
-3. **Place the file:** create `D:\Claude` and copy `2pctSDinfo_v1.6.py` into it.
-4. **Start it by double-clicking `2pctSDinfo_v1.6.py`.** The console window hides itself, and Windows asks for administrator rights (needed for recovery and the imager). Click **Yes**. If you click No, the Test tab still works but recovery and imaging will say access denied.
+3. **Place the file:** create `D:\Claude` and copy `2pctSDinfo_v1.7.py` into it.
+4. **Start it by double-clicking `2pctSDinfo_v1.7.py`.** The console window hides itself, and Windows asks for administrator rights (needed for recovery and the imager). Click **Yes**. If you click No, the Test tab still works but recovery and imaging will say access denied.
    - If double-clicking opens the file in an editor, right-click it, choose Open with, then Python (tick Always use this app).
-   - Manual start from a terminal: `python 2pctSDinfo_v1.6.py` (add `--no-admin` to skip the administrator prompt).
-5. Optional: right-click `2pctSDinfo_v1.6.py`, Send to, Desktop (create shortcut).
+   - Manual start from a terminal: `python 2pctSDinfo_v1.7.py` (add `--no-admin` to skip the administrator prompt).
+5. Optional: right-click `2pctSDinfo_v1.7.py`, Send to, Desktop (create shortcut).
 
 ## 3. Preparing the card
 
@@ -52,7 +52,7 @@ USB flash drives work the same way. Ignore the SD speed class line for USB drive
 
 The **About** tab shows the program name and version, Python and Windows details, whether it is running as administrator, where the script and settings file are, and the full version history. **Copy diagnostics** puts those details on the clipboard so you can paste them when asking for help. **Open project page** opens the GitHub page.
 
-Versions are written v1.0, v1.1, v1.2, v1.3, v1.4, v1.5, v1.6 and so on. The version appears in the window title, in saved reports, in the script's file name (`2pctSDinfo_v1.6.py`) and with `--version`.
+Versions are written v1.0, v1.1, v1.2, v1.3, v1.4, v1.5, v1.7 and so on. The version appears in the window title, in saved reports, in the script's file name (`2pctSDinfo_v1.7.py`) and with `--version`.
 
 ## 5. Safety notes
 
@@ -89,7 +89,7 @@ The **Recover deleted files** tab scans the card read-only and rebuilds deleted 
 1. **Stop using the card immediately.** New writes can permanently overwrite deleted files.
 2. **Do not format** the card and **do not run the test**.
 3. Put the card in a PC reader.
-4. Start the program (double-click `2pctSDinfo_v1.6.py`) and click **Yes** on the administrator prompt. Raw card reads need admin rights.
+4. Start the program (double-click `2pctSDinfo_v1.7.py`) and click **Yes** on the administrator prompt. Raw card reads need admin rights.
 
 ### Steps
 
@@ -150,10 +150,10 @@ Read a whole card to an image file, write an image back to a card (for example a
 Command line:
 
 ```
-python 2pctSDinfo_v1.6.py --image E:\ D:\Claude\card.img --whole-disk
-python 2pctSDinfo_v1.6.py --write-image D:\Claude\pi.img E:\
-python 2pctSDinfo_v1.6.py --verify D:\Claude\pi.img E:\
-python 2pctSDinfo_v1.6.py --hash D:\Claude\pi.img
+python 2pctSDinfo_v1.7.py --image E:\ D:\Claude\card.img --whole-disk
+python 2pctSDinfo_v1.7.py --write-image D:\Claude\pi.img E:\
+python 2pctSDinfo_v1.7.py --verify D:\Claude\pi.img E:\
+python 2pctSDinfo_v1.7.py --hash D:\Claude\pi.img
 ```
 
 Add `--yes` to skip the typed confirmation and `--no-verify` to skip verification after a write.
@@ -194,14 +194,34 @@ Windows refuses to format a volume above 32 GB as FAT32. When you choose FAT32 f
 - Operations run one at a time and take effect immediately. There is no pending-changes queue or undo as in AOMEI, so read each confirmation.
 - Merging, splitting, moving and converting partitions without data loss are not included.
 
+## 9a. Pi tab (Raspberry Pi Imager equivalent)
+
+Writes Raspberry Pi OS (or any image in Raspberry Pi's list) to a card and sets it up for first boot. Needs internet.
+
+1. Open the **Pi** tab. The list loads automatically from Raspberry Pi's servers (the same repository file the official Imager uses), so new releases appear without updating this program. If the main server is unreachable it tries mirrors, then the last saved copy.
+2. Pick your **Raspberry Pi model** to hide images that do not suit it (or leave "No filtering").
+3. Pick an operating system. Folders (for example "Raspberry Pi OS (other)") open with the arrow. To use a file you already have, click **Use own image file...** (.img, .xz, .gz, .zip).
+4. Pick the **Storage** (your SD card). System and internal disks are refused.
+5. Fill in **First-boot setup** if you want it: hostname, username and password, Wi-Fi name / password / country, time zone, keyboard, SSH (password login and/or a public key), and SPI / I2C / Serial / 1-Wire. Passwords are never saved to disk by this program; everything else is remembered.
+6. Click **Download and write to card**, type the drive letter to confirm. The program downloads the image (resumes if interrupted), checks its SHA-256, unpacks it, writes it, reads it back, then writes the setup files onto the card's boot partition.
+7. Click **Eject** on the right, put the card in the Pi.
+
+**Apply setup only** adds the setup to a card that is already written: select the card's boot drive (the small FAT32 one containing `cmdline.txt`) as Storage.
+
+Notes
+- Downloaded images are cached in `.2pctsdinfo_cache` in your user folder, so a second card needs no download. Unpacking needs free space equal to the unpacked image (a few GB).
+- Newer images (Raspberry Pi OS Trixie) take setup as cloud-init files `user-data` and `network-config`; older ones use `firstrun.sh` plus a `cmdline.txt` change. The program uses whichever the image's entry declares, or detects it on the card.
+- Wi-Fi passwords are stored as a hashed key, user passwords as SHA-512 hashes.
+- Custom or third-party images that do not support first-boot setup are written normally and the setup step is skipped.
+
 ## 10. Command line
 
 ```
-python 2pctSDinfo_v1.6.py --cli E:\ --mode quick --size 512 --report D:\Claude\report.txt
-python 2pctSDinfo_v1.6.py --cli E:\ --mode full
-python 2pctSDinfo_v1.6.py --image E:\ D:\Claude\card.img
-python 2pctSDinfo_v1.6.py --recover D:\Claude\card.img --out D:\Claude\Recovered
-python 2pctSDinfo_v1.6.py --recover E:\ --out D:\Claude\Recovered --types Photos,Documents
+python 2pctSDinfo_v1.7.py --cli E:\ --mode quick --size 512 --report D:\Claude\report.txt
+python 2pctSDinfo_v1.7.py --cli E:\ --mode full
+python 2pctSDinfo_v1.7.py --image E:\ D:\Claude\card.img
+python 2pctSDinfo_v1.7.py --recover D:\Claude\card.img --out D:\Claude\Recovered
+python 2pctSDinfo_v1.7.py --recover E:\ --out D:\Claude\Recovered --types Photos,Documents
 ```
 
 | Option | Meaning |
@@ -243,7 +263,7 @@ python 2pctSDinfo_v1.6.py --recover E:\ --out D:\Claude\Recovered --types Photos
 ## 13. Quick-start checklist
 
 1. Install Python with Add to PATH.
-2. Copy `2pctSDinfo_v1.6.py` to `D:\Claude`.
+2. Copy `2pctSDinfo_v1.7.py` to `D:\Claude`.
 3. Insert the card and run the program.
 4. Click Card info only, then run Quick, then Full on new or suspicious cards.
 5. Read the score and verdict and save the report.

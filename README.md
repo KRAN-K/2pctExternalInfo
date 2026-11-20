@@ -1,4 +1,4 @@
-# 2%SDinfo v1.6
+# 2%SDinfo v1.7
 
 A single-file Windows tool (Python 3.9+, standard library only) that checks micro SD cards and USB drives, and can recover accidentally deleted files.
 
@@ -7,6 +7,7 @@ A single-file Windows tool (Python 3.9+, standard library only) that checks micr
 - **Speed test:** sequential MB/s, random 4K IOPS, write stall detection.
 - **Stability score:** 0-100 with a verdict.
 - **Devices panel and dark mode:** the right side lists every disk and volume live; click one to select it in all tabs. Five themes (Light, Black, Gray, Crimson Eclipse, Deep Ocean, Violet Haze) from a dropdown, remembered between launches.
+- **Pi (Raspberry Pi Imager equivalent):** live OS list from Raspberry Pi's servers filtered by Pi model, download with SHA-256 check, write + verify, and first-boot setup (hostname, user, Wi-Fi, SSH, time zone, keyboard, SPI/I2C) as cloud-init or firstrun.sh.
 - **Partitions (AOMEI-style):** disk map, format (including FAT32 above 32 GB), create, delete, resize NTFS, label, drive letter, initialize MBR/GPT, clean, wipe, eject. Removable/USB/SD disks only.
 - **Eject:** button and right-click menu in the devices panel.
 - **Disk Imager:** read a card to an image, write an image to a card with verification, compare, and hash (MD5, SHA-1, SHA-256), with safety locks.
@@ -16,12 +17,12 @@ See [MANUAL.md](MANUAL.md) for the full installation and usage guide.
 
 ## Quick start
 
-Double-click **`2pctSDinfo_v1.6.py`** (needs Python 3.9+ with Tkinter, from python.org with "Add to PATH" ticked). The console hides itself and Windows asks for administrator rights, which recovery and the imager need.
+Double-click **`2pctSDinfo_v1.7.py`** (needs Python 3.9+ with Tkinter, from python.org with "Add to PATH" ticked). The console hides itself and Windows asks for administrator rights, which recovery and the imager need.
 
 Or from a terminal:
 
 ```
-python 2pctSDinfo_v1.6.py
+python 2pctSDinfo_v1.7.py
 ```
 
 Add `--no-admin` to skip the administrator prompt.
@@ -29,19 +30,20 @@ Add `--no-admin` to skip the administrator prompt.
 Command line:
 
 ```
-python 2pctSDinfo_v1.6.py --cli E:\ --mode quick --report report.txt
-python 2pctSDinfo_v1.6.py --image E:\ D:\Claude\card.img
-python 2pctSDinfo_v1.6.py --recover D:\Claude\card.img --out D:\Claude\Recovered
-python 2pctSDinfo_v1.6.py --format E:\ --fs FAT32 --label MYCARD
-python 2pctSDinfo_v1.6.py --eject E:\
+python 2pctSDinfo_v1.7.py --cli E:\ --mode quick --report report.txt
+python 2pctSDinfo_v1.7.py --image E:\ D:\Claude\card.img
+python 2pctSDinfo_v1.7.py --recover D:\Claude\card.img --out D:\Claude\Recovered
+python 2pctSDinfo_v1.7.py --format E:\ --fs FAT32 --label MYCARD
+python 2pctSDinfo_v1.7.py --eject E:\
 ```
 
 ## Versions
 
-Versions are written v1.0, v1.1, v1.2, v1.3 ... The current file is `2pctSDinfo_v1.6.py`. To release a new version: change `APP_VERSION`, add an entry at the top of `CHANGELOG` (it appears on the About tab), rename the file to match, and update the docs. Extra About-tab sections can be added to `ABOUT_EXTRA`.
+Versions are written v1.0, v1.1, v1.2, v1.3 ... The current file is `2pctSDinfo_v1.7.py`. To release a new version: change `APP_VERSION`, add an entry at the top of `CHANGELOG` (it appears on the About tab), rename the file to match, and update the docs. Extra About-tab sections can be added to `ABOUT_EXTRA`.
 
 | Version | Highlights |
 |---|---|
+| v1.7 | New Pi tab: Raspberry Pi OS list, download, write, first-boot setup |
 | v1.6 | Themes renamed (Black, Gray) with a lighter Gray, new Violet Haze |
 | v1.5 | Partitions tab (format, create, delete, resize, wipe), FAT32 above 32 GB, Eject |
 | v1.4 | Theme dropdown: Dark Gray, Crimson Eclipse (black and red), Deep Ocean |

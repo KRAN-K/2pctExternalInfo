@@ -1,10 +1,10 @@
 # NEED PYTHON? Download the Windows installer here (copy and paste into your browser): https://www.python.org/downloads/windows/
 # On the first installer screen tick "Add python.exe to PATH", click Install Now, then double-click this file (2pctSDinfo).
 r"""
-2%SDinfo  v1.6  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
+2%SDinfo  v1.7  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
 
-GUI:   python 2pctSDinfo_v1.6.py
-CLI:   python 2pctSDinfo_v1.6.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
+GUI:   python 2pctSDinfo_v1.7.py
+CLI:   python 2pctSDinfo_v1.7.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
 
 What it does
   1. CARD INFO      label, filesystem, size, free space, serial, reader/bus type, model,
@@ -42,12 +42,19 @@ IS_WIN = sys.platform.startswith("win")
 # App identity and version history  (add a new entry at the TOP of CHANGELOG for each release)
 # ----------------------------------------------------------------------------
 APP_NAME = "2%SDinfo"
-APP_VERSION = "1.6"
+APP_VERSION = "1.7"
 APP_TAG = "v" + APP_VERSION
 APP_TITLE = f"{APP_NAME} {APP_TAG}"
 APP_TAGLINE = "SD card & USB drive checker, disk imager and deleted-file recovery"
 APP_REPO = "https://github.com/KRAN-K/2pctExternalInfo"
 CHANGELOG = [
+    ("1.7", "2026-11-19", [
+        "New Pi tab, a Raspberry Pi Imager equivalent: the OS list is loaded live from Raspberry Pi's servers (filter by Pi model)",
+        "Downloads the image, checks its SHA-256, unpacks it (.xz / .gz / .zip), writes it to the card and reads it back",
+        "First-boot setup like Imager's Edit settings: hostname, user and password, Wi-Fi, time zone, keyboard, SSH (with key), SPI / I2C / serial / 1-Wire",
+        "Setup is written as cloud-init files (user-data, network-config) or the older firstrun.sh, whichever the image uses",
+        "'Apply setup only' button to add the setup to a card that is already written; 'Use own image file' for local images",
+    ]),
     ("1.6", "2026-11-19", [
         "Themes renamed: Dark is now Black (true black), Dark Gray is now Gray and much lighter",
         "New theme: Violet Haze (purple)",
@@ -1609,6 +1616,456 @@ def eject_disk(number, letters, log=print):
 
 
 # ----------------------------------------------------------------------------
+# PI TAB  (Raspberry Pi Imager equivalent: live OS list, download, write, first-boot setup)
+# ----------------------------------------------------------------------------
+PI_REPO_URL = "https://downloads.raspberrypi.org/os_list_imagingutility_v4.json"
+PI_REPO_MIRRORS = ["https://downloads.raspberrypi.com/os_list_imagingutility_v4.json",
+                   "https://mirror.iscas.ac.cn/raspberry-pi-os-images/os_list_imagingutility_v4.json"]
+PI_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".2pctsdinfo_cache")
+PI_LIST_CACHE = os.path.join(PI_CACHE_DIR, "os_list_v4.json")
+CRYPT64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+def pi_http_get(url, timeout=25):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": APP_NAME + "/" + APP_VERSION})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def pi_load_repo(url=None, log=print):
+    """Fetch the official Imager repository JSON (falls back to mirrors, then to the saved copy).
+    Returns (data, source_text)."""
+    url = url or os.environ.get("SDCC_PI_REPO")          # custom repository (also used by tests)
+    urls = [url] if url else [PI_REPO_URL] + PI_REPO_MIRRORS
+    last = None
+    for u in urls:
+        try:
+            raw = pi_http_get(u)
+            data = json.loads(raw.decode("utf-8"))
+            if not isinstance(data, dict) or "os_list" not in data:
+                raise ValueError("not an Imager repository file")
+            if not url:
+                os.makedirs(PI_CACHE_DIR, exist_ok=True)
+                with open(PI_LIST_CACHE, "wb") as f:
+                    f.write(raw)
+            return data, u
+        except Exception as e:
+            last = e
+            log(f"Could not load {u}: {e}")
+    if not url and os.path.isfile(PI_LIST_CACHE):
+        with open(PI_LIST_CACHE, encoding="utf-8") as f:
+            return json.load(f), "saved copy (offline)"
+    raise RuntimeError(f"Could not load the Raspberry Pi OS list: {last}")
+
+
+def pi_device_choices(data):
+    """[(name, tags)] from the repository's device list; first entry = no filter."""
+    out = [("No filtering (show everything)", [])]
+    for d in (data.get("imager") or {}).get("devices") or []:
+        out.append((d.get("name", "?"), list(d.get("tags") or [])))
+    return out
+
+
+def pi_visible(node, tags):
+    """Does this OS entry (or any entry inside a category) suit the selected Pi model?"""
+    if node.get("url") == "internal://format":
+        return False
+    if node.get("subitems"):
+        return any(pi_visible(c, tags) for c in node["subitems"])
+    if node.get("subitems_url"):
+        return True                      # looked at once opened
+    devs = node.get("devices") or []
+    return (not tags) or (not devs) or bool(set(devs) & set(tags))
+
+
+_PI_SUB_CACHE = {}
+
+
+def pi_children(node, tags, log=print):
+    """Visible child entries of a category (fetches 'subitems_url' lists on demand)."""
+    subs = node.get("subitems")
+    if subs is None and node.get("subitems_url"):
+        u = node["subitems_url"]
+        if u not in _PI_SUB_CACHE:
+            try:
+                d = json.loads(pi_http_get(u).decode("utf-8"))
+                _PI_SUB_CACHE[u] = d.get("os_list") or d.get("subitems") or []
+            except Exception as e:
+                log(f"Could not load sub-list {u}: {e}")
+                _PI_SUB_CACHE[u] = []
+        subs = _PI_SUB_CACHE[u]
+    return [c for c in (subs or []) if pi_visible(c, tags)]
+
+
+def pi_is_category(node):
+    return bool(node.get("subitems") is not None or node.get("subitems_url"))
+
+
+def pi_download(url, dest, expect_sha256=None, progress=None, stop=None, log=print):
+    """Download url -> dest (resumes a .part file). Checks SHA-256 when given."""
+    import urllib.request
+    stop = stop or threading.Event()
+    if os.path.isfile(dest) and (not expect_sha256 or hash_file(dest)["SHA256"] == expect_sha256.lower()):
+        log("Already downloaded: " + os.path.basename(dest))
+        return dest
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    part = dest + ".part"
+    have = os.path.getsize(part) if os.path.isfile(part) else 0
+    hdr = {"User-Agent": APP_NAME + "/" + APP_VERSION}
+    if have:
+        hdr["Range"] = "bytes=%d-" % have
+    r = urllib.request.urlopen(urllib.request.Request(url, headers=hdr), timeout=30)
+    mode = "ab"
+    if have and r.status != 206:
+        have, mode = 0, "wb"
+    total = int(r.headers.get("Content-Length") or 0) + have
+    log("Downloading %s (%s)" % (url, fmt_size(total) if total else "size unknown"))
+    t0 = time.time()
+    done = have
+    with open(part, mode) as f:
+        while True:
+            if stop.is_set():
+                raise Stopped()
+            b = r.read(1024 * 1024)
+            if not b:
+                break
+            f.write(b)
+            done += len(b)
+            if progress and total:
+                progress(done / total, "Downloading")
+    r.close()
+    if total and done < total:
+        raise RuntimeError("Download ended early - run it again to resume.")
+    if expect_sha256:
+        if hash_file(part, progress=lambda f_, s_: progress and progress(f_, "Checking download"), stop=stop)["SHA256"] != expect_sha256.lower():
+            os.remove(part)
+            raise RuntimeError("Downloaded file failed its SHA-256 check (deleted). Try again.")
+        log("Download checksum OK.")
+    os.replace(part, dest)
+    log("Download finished at %.1f MB/s." % (done / 1e6 / max(0.001, time.time() - t0)))
+    return dest
+
+
+def pi_extract(src, dest, expect_sha256=None, progress=None, stop=None, log=print):
+    """Decompress .xz / .gz / .zip / .zst (or copy a raw image) into dest."""
+    stop = stop or threading.Event()
+    low = src.lower()
+    tot = os.path.getsize(src)
+    h = hashlib.sha256()
+    written = 0
+    consumed = [0]
+
+    def sink(out, chunk):
+        nonlocal written
+        out.write(chunk)
+        h.update(chunk)
+        written += len(chunk)
+
+    with open(dest, "wb") as out:
+        if low.endswith(".xz"):
+            import lzma
+            d = lzma.LZMADecompressor()
+            with open(src, "rb") as f:
+                while True:
+                    if stop.is_set():
+                        raise Stopped()
+                    b = f.read(2 * MB)
+                    if not b:
+                        break
+                    consumed[0] += len(b)
+                    while not d.eof:
+                        sink(out, d.decompress(b, 8 * MB))
+                        b = b""
+                        if d.needs_input:
+                            break
+                    if progress:
+                        progress(consumed[0] / max(1, tot), "Unpacking")
+        elif low.endswith(".gz"):
+            import gzip
+            with gzip.open(src, "rb") as f:
+                while True:
+                    if stop.is_set():
+                        raise Stopped()
+                    b = f.read(4 * MB)
+                    if not b:
+                        break
+                    sink(out, b)
+                    if progress:
+                        progress(min(0.99, f.fileobj.tell() / max(1, tot)), "Unpacking")
+        elif low.endswith(".zip"):
+            import zipfile
+            with zipfile.ZipFile(src) as z:
+                names = [n for n in z.namelist() if n.lower().endswith((".img", ".iso", ".bin"))] or z.namelist()
+                info = z.getinfo(names[0])
+                with z.open(info) as f:
+                    while True:
+                        if stop.is_set():
+                            raise Stopped()
+                        b = f.read(4 * MB)
+                        if not b:
+                            break
+                        sink(out, b)
+                        if progress:
+                            progress(written / max(1, info.file_size), "Unpacking")
+        elif low.endswith(".zst"):
+            try:
+                from compression import zstd as _z
+            except ImportError:
+                try:
+                    import zstandard as _z2
+                except ImportError:
+                    raise RuntimeError("This image is .zst compressed. Needs Python 3.14+ or 'pip install zstandard'.")
+                with open(src, "rb") as f:
+                    for b in _z2.ZstdDecompressor().read_to_iter(f):
+                        sink(out, b)
+            else:
+                with _z.open(src, "rb") as f:
+                    while True:
+                        b = f.read(4 * MB)
+                        if not b:
+                            break
+                        sink(out, b)
+        else:
+            with open(src, "rb") as f:
+                while True:
+                    if stop.is_set():
+                        raise Stopped()
+                    b = f.read(4 * MB)
+                    if not b:
+                        break
+                    sink(out, b)
+                    if progress:
+                        progress(written / max(1, tot), "Copying")
+    if expect_sha256 and h.hexdigest() != expect_sha256.lower():
+        os.remove(dest)
+        raise RuntimeError("Unpacked image failed its SHA-256 check - the download is damaged. Delete the cached file and retry.")
+    log("Unpacked image: %s%s" % (fmt_size(written), ", checksum OK" if expect_sha256 else ""))
+    return written
+
+
+def pi_prepare_image(node, log=print, progress=None, stop=None):
+    """Make a raw .img ready to write from an OS entry (download + unpack) or a local file."""
+    os.makedirs(PI_CACHE_DIR, exist_ok=True)
+    local = node.get("local")
+    if local:
+        src = local
+    else:
+        url = node["url"]
+        name = os.path.basename(url.split("?")[0]) or "image.img.xz"
+        src = pi_download(url, os.path.join(PI_CACHE_DIR, name), node.get("image_download_sha256"), progress, stop, log)
+    need = int(node.get("extract_size") or os.path.getsize(src) * 3)
+    import shutil
+    free = shutil.disk_usage(PI_CACHE_DIR).free
+    if free < need + 256 * MB:
+        raise RuntimeError("Not enough free space in %s: need about %s, have %s." % (PI_CACHE_DIR, fmt_size(need), fmt_size(free)))
+    out = os.path.join(PI_CACHE_DIR, "_unpacked.img")
+    pi_extract(src, out, node.get("extract_sha256"), progress, stop, log)
+    return out
+
+
+def sha512_crypt(password, salt=None, rounds=5000):
+    """Linux '$6$' password hash (what cloud-init / chpasswd -e expect). Pure Python."""
+    pw = password.encode("utf-8")
+    if salt is None:
+        rnd = random.SystemRandom()
+        salt = "".join(rnd.choice(CRYPT64) for _ in range(16))
+    sb = salt[:16].encode()
+    H = hashlib.sha512
+    b = H(pw + sb + pw).digest()
+    ain = pw + sb + b * (len(pw) // 64) + b[:len(pw) % 64]
+    n = len(pw)
+    while n > 0:
+        ain += b if n & 1 else pw
+        n >>= 1
+    a = H(ain).digest()
+    dp = H(pw * len(pw)).digest()
+    p = dp * (len(pw) // 64) + dp[:len(pw) % 64]
+    ds = H(sb * (16 + a[0])).digest()
+    s = ds * (len(sb) // 64) + ds[:len(sb) % 64]
+    c = a
+    for i in range(rounds):
+        x = p if i & 1 else c
+        if i % 3:
+            x += s
+        if i % 7:
+            x += p
+        x += c if i & 1 else p
+        c = H(x).digest()
+    order = [(0, 21, 42), (22, 43, 1), (44, 2, 23), (3, 24, 45), (25, 46, 4), (47, 5, 26), (6, 27, 48),
+             (28, 49, 7), (50, 8, 29), (9, 30, 51), (31, 52, 10), (53, 11, 32), (12, 33, 54), (34, 55, 13),
+             (56, 14, 35), (15, 36, 57), (37, 58, 16), (59, 17, 38), (18, 39, 60), (40, 61, 19), (62, 20, 41)]
+    out = ""
+    for x1, x2, x3 in order:
+        v = c[x1] << 16 | c[x2] << 8 | c[x3]
+        for _ in range(4):
+            out += CRYPT64[v & 63]
+            v >>= 6
+    v = c[63]
+    for _ in range(2):
+        out += CRYPT64[v & 63]
+        v >>= 6
+    return "$6$" + salt[:16] + "$" + out
+
+
+def wifi_psk(ssid, passphrase):
+    """WPA2 pre-shared key (64 hex chars) - lets the Wi-Fi password be stored un-readable."""
+    return hashlib.pbkdf2_hmac("sha1", passphrase.encode(), ssid.encode(), 4096, 32).hex()
+
+
+def _q(s):
+    return json.dumps(str(s), ensure_ascii=False)       # JSON string == valid YAML double-quoted string
+
+
+def pi_userdata(o, rpi=True):
+    L = ["#cloud-config", "# written by " + APP_TITLE]
+    if o.get("hostname"):
+        L += ["hostname: " + _q(o["hostname"]), "manage_etc_hosts: true"]
+    if o.get("timezone"):
+        L.append("timezone: " + _q(o["timezone"]))
+    if o.get("keymap"):
+        L += ["keyboard:", "  model: pc105", "  layout: " + _q(o["keymap"])]
+    if o.get("username") and o.get("password"):
+        L += ["users:", "  - name: " + _q(o["username"]),
+              "    groups: users,adm,dialout,audio,netdev,video,plugdev,cdrom,games,input,gpio,spi,i2c,render,sudo",
+              "    shell: /bin/bash", "    lock_passwd: false", "    passwd: " + _q(sha512_crypt(o["password"])),
+              "    sudo: ALL=(ALL) NOPASSWD:ALL"]
+        keys = [k.strip() for k in (o.get("ssh_keys") or "").splitlines() if k.strip()]
+        if keys:
+            L.append("    ssh_authorized_keys:")
+            L += ["      - " + _q(k) for k in keys]
+    if o.get("ssh"):
+        L.append("enable_ssh: true" if rpi else "ssh_pwauth: true")
+        L.append("ssh_pwauth: " + ("true" if o.get("ssh_pw", True) else "false"))
+    if rpi:
+        r = [(k, o.get(k)) for k in ("spi", "i2c", "serial", "onewire") if o.get(k)]
+        if r:
+            L.append("rpi:")
+            L += ["  %s: true" % k for k, _ in r]
+    return "\n".join(L) + "\n"
+
+
+def pi_networkconfig(o):
+    if not o.get("wifi_ssid"):
+        return None
+    L = ["network:", "  version: 2", "  wifis:", "    renderer: NetworkManager", "    wlan0:", "      dhcp4: true",
+         "      optional: true"]
+    if o.get("wifi_country"):
+        L.append("      regulatory-domain: " + _q(o["wifi_country"].upper()))
+    L += ["      access-points:", "        " + _q(o["wifi_ssid"]) + ":"]
+    if o.get("wifi_pass"):
+        pw = o["wifi_pass"]
+        L.append("          password: " + _q(wifi_psk(o["wifi_ssid"], pw) if 8 <= len(pw) <= 63 else pw))
+    if o.get("wifi_hidden"):
+        L.append("          hidden: true")
+    return "\n".join(L) + "\n"
+
+
+def pi_firstrun(o):
+    """Legacy first-boot script (init_format 'systemd')."""
+    def sq(s):
+        return "'" + str(s).replace("'", "'\"'\"'") + "'"
+    S = ["#!/bin/bash", "set +e", "IC=/usr/lib/raspberrypi-sys-mods/imager_custom"]
+    if o.get("hostname"):
+        S += ["CURRENT_HOSTNAME=`cat /etc/hostname | tr -d \" \\t\\n\\r\"`",
+              "if [ -f $IC ]; then $IC set_hostname %s; else" % sq(o["hostname"]),
+              "  echo %s >/etc/hostname" % sq(o["hostname"]),
+              "  sed -i \"s/127.0.1.1.*$CURRENT_HOSTNAME/127.0.1.1\\t%s/g\" /etc/hosts" % o["hostname"], "fi"]
+    if o.get("ssh"):
+        if o.get("ssh_keys", "").strip():
+            S += ["FIRSTUSER=`getent passwd 1000 | cut -d: -f1`", "FIRSTUSERHOME=`getent passwd 1000 | cut -d: -f6`"]
+            S += ["if [ -f $IC ]; then $IC enable_ssh -k %s; else" % sq(o["ssh_keys"].strip().splitlines()[0]),
+                  "  install -o \"$FIRSTUSER\" -m 700 -d \"$FIRSTUSERHOME/.ssh\"",
+                  "  echo %s >> \"$FIRSTUSERHOME/.ssh/authorized_keys\"" % sq(o["ssh_keys"].strip().splitlines()[0]),
+                  "  systemctl enable ssh", "fi"]
+        else:
+            S += ["if [ -f $IC ]; then $IC enable_ssh; else systemctl enable ssh; fi"]
+    if o.get("username") and o.get("password"):
+        S += ["FIRSTUSER=`getent passwd 1000 | cut -d: -f1`",
+              "if [ -f /usr/lib/userconf-pi/userconf ]; then /usr/lib/userconf-pi/userconf %s %s; else" % (sq(o["username"]), sq(sha512_crypt(o["password"]))),
+              "  echo \"$FIRSTUSER:\"%s | chpasswd -e" % sq(sha512_crypt(o["password"])),
+              "  [ \"$FIRSTUSER\" != %s ] && usermod -l %s \"$FIRSTUSER\" && usermod -m -d /home/%s %s && groupmod -n %s \"$FIRSTUSER\"" % ((sq(o["username"]),) * 2 + (o["username"], sq(o["username"]), sq(o["username"]))),
+              "fi"]
+    if o.get("wifi_ssid"):
+        S += ["if [ -f $IC ]; then $IC set_wlan %s %s %s; fi" % (
+            sq(o["wifi_ssid"]), sq(wifi_psk(o["wifi_ssid"], o["wifi_pass"]) if o.get("wifi_pass") else ""), sq((o.get("wifi_country") or "US").upper()))]
+    if o.get("keymap") or o.get("timezone"):
+        if o.get("keymap"):
+            S.append("[ -f $IC ] && $IC set_keymap %s" % sq(o["keymap"]))
+        if o.get("timezone"):
+            S.append("[ -f $IC ] && $IC set_timezone %s" % sq(o["timezone"]))
+    S += ["rm -f /boot/firstrun.sh", "sed -i 's| systemd.run.*||g' /boot/cmdline.txt", "exit 0"]
+    return "\n".join(S) + "\n"
+
+
+PI_CMDLINE_ADD = " systemd.run=/boot/firstrun.sh systemd.run_success_action=reboot systemd.unit=kernel-command-line.target"
+
+
+def pi_detect_format(boot_dir):
+    if os.path.isfile(os.path.join(boot_dir, "user-data")):
+        return "cloudinit-rpi"
+    if os.path.isfile(os.path.join(boot_dir, "cmdline.txt")):
+        return "systemd"
+    return None
+
+
+def pi_write_boot_files(boot_dir, o, fmt=None, log=print):
+    """Write the first-boot setup onto the card's boot partition (the FAT32 one)."""
+    fmt = fmt if fmt and fmt != "none" else pi_detect_format(boot_dir)
+    if fmt not in ("cloudinit", "cloudinit-rpi", "systemd"):
+        log("This image has no first-boot setup support - skipped customisation.")
+        return False
+
+    def w(name, text):
+        with open(os.path.join(boot_dir, name), "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        log("  wrote " + name)
+
+    if fmt.startswith("cloudinit"):
+        w("user-data", pi_userdata(o, rpi=(fmt == "cloudinit-rpi")))
+        nc = pi_networkconfig(o)
+        if nc:
+            w("network-config", nc)
+    else:
+        w("firstrun.sh", pi_firstrun(o))
+        cp = os.path.join(boot_dir, "cmdline.txt")
+        with open(cp, encoding="utf-8") as f:
+            cur = f.read().strip()
+        cur = re.sub(r"\s+systemd\.(run|run_success_action|unit)=\S+", "", cur)
+        with open(cp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(cur + PI_CMDLINE_ADD + "\n")
+        log("  updated cmdline.txt")
+    log("First-boot setup written (%s)." % fmt)
+    return True
+
+
+def pi_find_boot(disk_number, timeout=40, log=print):
+    """Windows: wait for the freshly written card's FAT boot partition to get a drive letter."""
+    t0 = time.time()
+    tried_assign = False
+    while time.time() - t0 < timeout:
+        for d in list_devices():
+            if int(d.get("Number", -1)) != int(disk_number):
+                continue
+            for v in d.get("Volumes") or []:
+                if str(v.get("FS", "")).upper().startswith("FAT") and v.get("Letter"):
+                    return v["Letter"] + ":\\"
+        if not tried_assign and time.time() - t0 > 8:
+            tried_assign = True
+            try:
+                assign_letter(int(disk_number), 1)
+            except Exception as e:
+                log("Could not mount the boot partition automatically: %s" % e)
+        time.sleep(2)
+    return None
+
+
+PI_SETTING_KEYS = ("hostname", "username", "wifi_ssid", "wifi_country", "timezone", "keymap", "ssh", "ssh_pw",
+                   "spi", "i2c", "serial", "onewire", "wifi_hidden", "ssh_keys")
+
+
+
+# ----------------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------------
 def run_cli(args):
@@ -1650,11 +2107,13 @@ def run_gui():
     rtab = ttk.Frame(nb)
     itab = ttk.Frame(nb)
     ptab = ttk.Frame(nb)
+    pitab = ttk.Frame(nb)
     atab = ttk.Frame(nb)
     nb.add(tab, text="  Test & Info  ")
     nb.add(rtab, text="  Recover deleted files  ")
     nb.add(itab, text="  Disk Imager  ")
     nb.add(ptab, text="  Partitions  ")
+    nb.add(pitab, text="  Pi  ")
     nb.add(atab, text="  About  ")
     q = queue.Queue()
     stop_evt = threading.Event()
@@ -2653,6 +3112,351 @@ def run_gui():
 
     ppoll()
 
+    # ---------------- Pi tab (Raspberry Pi Imager equivalent) ----------------
+    pi_saved = load_settings().get("pi", {})
+    pistate = {"data": None, "running": False, "nodes": {}, "custom": None, "tags": [], "devs": []}
+    piq = queue.Queue()
+    pistop = threading.Event()
+    piwarn = tk.Label(pitab, justify="left", anchor="w", wraplength=820,
+                      text="WRITING ERASES THE WHOLE CARD. Only removable / USB / SD disks are allowed; your system drive is "
+                           "blocked. The OS list comes live from Raspberry Pi's servers; images are downloaded, checked "
+                           "against their SHA-256, written and read back.")
+    piwarn.pack(fill="x", padx=8, pady=(6, 2))
+    pt1 = ttk.Frame(pitab, padding=(8, 2))
+    pt1.pack(fill="x")
+    ttk.Label(pt1, text="Raspberry Pi model:").pack(side="left")
+    picombo = ttk.Combobox(pt1, state="readonly", width=34, values=["Loading list..."])
+    picombo.current(0)
+    picombo.pack(side="left", padx=6)
+    ttk.Button(pt1, text="Reload list", command=lambda: pi_load()).pack(side="left")
+    pisrc = ttk.Label(pt1, text="")
+    pisrc.pack(side="left", padx=8)
+    pitree = ttk.Treeview(pitab, columns=("rel", "size"), height=7, selectmode="browse")
+    pitree.heading("#0", text="Operating system")
+    pitree.heading("rel", text="Released")
+    pitree.heading("size", text="Download")
+    pitree.column("#0", width=380, stretch=True)
+    pitree.column("rel", width=90, stretch=False)
+    pitree.column("size", width=90, stretch=False)
+    pitree.pack(fill="x", padx=8, pady=4)
+    pidesc = ttk.Label(pitab, text="Pick an operating system.", wraplength=820, justify="left")
+    pidesc.pack(anchor="w", padx=8)
+    pt2 = ttk.Frame(pitab, padding=(8, 4))
+    pt2.pack(fill="x")
+    ttk.Label(pt2, text="Storage:").pack(side="left")
+    pdcombo = ttk.Combobox(pt2, values=[d[1] for d in drives], width=50, state="readonly")
+    if drives:
+        pdcombo.current(0)
+    pdcombo.pack(side="left", padx=6)
+    ttk.Button(pt2, text="Use own image file...", command=lambda: pi_pick_custom()).pack(side="left")
+    picust = ttk.Label(pt2, text="")
+    picust.pack(side="left", padx=8)
+
+    sv = lambda k, d="": tk.StringVar(value=pi_saved.get(k, d))
+    bv = lambda k, d=False: tk.BooleanVar(value=pi_saved.get(k, d))
+    p_host, p_user, p_pass = sv("hostname", "raspberrypi"), sv("username", "pi"), tk.StringVar()
+    p_ssid, p_wpass, p_cc = sv("wifi_ssid"), tk.StringVar(), sv("wifi_country", "US")
+    p_tz, p_km, p_key = sv("timezone", "America/Boise"), sv("keymap", "us"), sv("ssh_keys")
+    p_on, p_ssh, p_sshpw = bv("on", True), bv("ssh", True), bv("ssh_pw", True)
+    p_hid, p_spi, p_i2c, p_ser, p_ow = bv("wifi_hidden"), bv("spi"), bv("i2c"), bv("serial"), bv("onewire")
+    p_verify = tk.BooleanVar(value=True)
+    sf = ttk.LabelFrame(pitab, text=" First-boot setup (Imager's \"Edit settings\") ", padding=6)
+    sf.pack(fill="x", padx=8, pady=4)
+    ttk.Checkbutton(sf, text="Apply this setup after writing", variable=p_on).grid(row=0, column=0, columnspan=2, sticky="w")
+    ttk.Label(sf, text="Hostname").grid(row=1, column=0, sticky="w")
+    ttk.Entry(sf, textvariable=p_host, width=20).grid(row=1, column=1, sticky="w", padx=4, pady=1)
+    ttk.Label(sf, text="Username").grid(row=2, column=0, sticky="w")
+    ttk.Entry(sf, textvariable=p_user, width=20).grid(row=2, column=1, sticky="w", padx=4, pady=1)
+    ttk.Label(sf, text="Password").grid(row=3, column=0, sticky="w")
+    ttk.Entry(sf, textvariable=p_pass, width=20, show="*").grid(row=3, column=1, sticky="w", padx=4, pady=1)
+    ttk.Label(sf, text="Wi-Fi name").grid(row=1, column=2, sticky="w", padx=(14, 0))
+    ttk.Entry(sf, textvariable=p_ssid, width=20).grid(row=1, column=3, sticky="w", padx=4)
+    ttk.Label(sf, text="Wi-Fi password").grid(row=2, column=2, sticky="w", padx=(14, 0))
+    ttk.Entry(sf, textvariable=p_wpass, width=20, show="*").grid(row=2, column=3, sticky="w", padx=4)
+    ttk.Label(sf, text="Wi-Fi country").grid(row=3, column=2, sticky="w", padx=(14, 0))
+    ttk.Combobox(sf, textvariable=p_cc, width=6, values=["US", "GB", "CA", "AU", "DE", "FR", "ES", "IT", "NL", "JP", "NZ", "IE"]).grid(row=3, column=3, sticky="w", padx=4)
+    ttk.Checkbutton(sf, text="Hidden network", variable=p_hid).grid(row=3, column=3, sticky="e")
+    ttk.Label(sf, text="Time zone").grid(row=1, column=4, sticky="w", padx=(14, 0))
+    ttk.Combobox(sf, textvariable=p_tz, width=17, values=["America/Boise", "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "America/Phoenix", "America/Anchorage", "Pacific/Honolulu", "Europe/London", "Europe/Berlin", "Europe/Paris", "Asia/Tokyo", "Australia/Sydney", "UTC"]).grid(row=1, column=5, sticky="w", padx=4)
+    ttk.Label(sf, text="Keyboard").grid(row=2, column=4, sticky="w", padx=(14, 0))
+    ttk.Combobox(sf, textvariable=p_km, width=8, values=["us", "gb", "de", "fr", "es", "it", "jp", "ca"]).grid(row=2, column=5, sticky="w", padx=4)
+    ttk.Checkbutton(sf, text="Enable SSH", variable=p_ssh).grid(row=4, column=0, columnspan=2, sticky="w")
+    ttk.Checkbutton(sf, text="Allow SSH password login", variable=p_sshpw).grid(row=4, column=2, columnspan=2, sticky="w", padx=(14, 0))
+    ttk.Label(sf, text="SSH public key").grid(row=5, column=0, sticky="w")
+    ttk.Entry(sf, textvariable=p_key, width=64).grid(row=5, column=1, columnspan=5, sticky="we", padx=4, pady=1)
+    pif = ttk.Frame(sf)
+    pif.grid(row=6, column=0, columnspan=6, sticky="w")
+    ttk.Label(pif, text="Enable interfaces:").pack(side="left")
+    for t_, v_ in (("SPI", p_spi), ("I2C", p_i2c), ("Serial", p_ser), ("1-Wire", p_ow)):
+        ttk.Checkbutton(pif, text=t_, variable=v_).pack(side="left", padx=6)
+    ttk.Label(pif, text="(cloud-init images only)").pack(side="left")
+    pib = ttk.Frame(pitab, padding=(8, 4))
+    pib.pack(fill="x")
+    pbtn_write = ttk.Button(pib, text="Download and write to card", command=lambda: pi_start("write"))
+    pbtn_write.pack(side="left")
+    pbtn_apply = ttk.Button(pib, text="Apply setup only (card already written)", command=lambda: pi_start("apply"))
+    pbtn_apply.pack(side="left", padx=6)
+    pstop_btn = ttk.Button(pib, text="Stop", command=pistop.set, state="disabled")
+    pstop_btn.pack(side="left")
+    ttk.Checkbutton(pib, text="Verify after write", variable=p_verify).pack(side="left", padx=10)
+    pipb = ttk.Progressbar(pitab, maximum=100)
+    pipb.pack(fill="x", padx=8)
+    pistatus = ttk.Label(pitab, text="Idle")
+    pistatus.pack(anchor="w", padx=8)
+    pitxt = tk.Text(pitab, font=("Consolas", 9), wrap="none", height=5)
+    pitxt.pack(fill="both", expand=True, padx=8, pady=(2, 6))
+
+    def pilog(m):
+        pitxt.insert("end", m + "\n")
+        pitxt.see("end")
+
+    def pi_opts():
+        o = {"hostname": p_host.get().strip(), "username": p_user.get().strip(), "password": p_pass.get(),
+             "wifi_ssid": p_ssid.get(), "wifi_pass": p_wpass.get(), "wifi_country": p_cc.get().strip(),
+             "wifi_hidden": p_hid.get(), "timezone": p_tz.get().strip(), "keymap": p_km.get().strip(),
+             "ssh": p_ssh.get(), "ssh_pw": p_sshpw.get(), "ssh_keys": p_key.get().strip(),
+             "spi": p_spi.get(), "i2c": p_i2c.get(), "serial": p_ser.get(), "onewire": p_ow.get()}
+        return o
+
+    def pi_save():
+        s_ = load_settings()
+        o = pi_opts()
+        d = {k: o[k] for k in PI_SETTING_KEYS if k in o}      # passwords are never saved
+        d["on"] = p_on.get()
+        s_["pi"] = d
+        save_settings(s_)
+
+    def pi_check_opts(o):
+        if not p_on.get():
+            return None
+        if o["hostname"] and not re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?", o["hostname"]):
+            return "Hostname may only use letters, digits and hyphens."
+        if bool(o["username"]) != bool(o["password"]):
+            return "Enter both a username and a password (or leave both empty)."
+        if o["username"] and not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", o["username"]):
+            return "Username must be lowercase letters/digits (start with a letter)."
+        if o["wifi_ssid"] and o["wifi_pass"] and not (8 <= len(o["wifi_pass"]) <= 63):
+            return "A Wi-Fi password must be 8-63 characters."
+        if o["wifi_ssid"] and not re.fullmatch(r"[A-Za-z]{2}", o["wifi_country"]):
+            return "Enter the 2-letter Wi-Fi country code (for example US)."
+        return None
+
+    # ---- OS list
+    def pi_selected_node():
+        sel = pitree.selection()
+        n = pistate["nodes"].get(sel[0]) if sel else None
+        if n is None and pistate["custom"]:
+            return pistate["custom"]
+        return n if (n and not pi_is_category(n)) else None
+
+    def pi_fill(parent, nodes):
+        for n in nodes:
+            iid = pitree.insert(parent, "end", text=n.get("name", "?"),
+                                values=(n.get("release_date", ""),
+                                        fmt_size(int(n["image_download_size"])) if n.get("image_download_size") else ""))
+            pistate["nodes"][iid] = n
+            if pi_is_category(n):
+                pitree.insert(iid, "end", iid=iid + "!dummy", text="...")
+
+    def pi_rebuild():
+        for i in pitree.get_children():
+            pitree.delete(i)
+        pistate["nodes"].clear()
+        d = pistate["data"]
+        if d:
+            pi_fill("", [n for n in d["os_list"] if pi_visible(n, pistate["tags"])])
+
+    def pi_open(_e=None):
+        iid = pitree.focus()
+        n = pistate["nodes"].get(iid)
+        if not n or not pitree.exists(iid + "!dummy"):
+            return
+        pitree.delete(iid + "!dummy")
+        if n.get("subitems") is not None:
+            pi_fill(iid, pi_children(n, pistate["tags"]))
+        else:
+            ph = pitree.insert(iid, "end", iid=iid + "!wait", text="Loading...")
+            tags = list(pistate["tags"])
+            threading.Thread(target=lambda: piq.put(("kids", (iid, pi_children(n, tags, lambda m: piq.put(("log", m)))))), daemon=True).start()
+
+    def pi_pick(_e=None):
+        n = pi_selected_node()
+        if n is None:
+            pidesc.config(text="Pick an operating system (open a folder with the arrow).")
+            return
+        fm = n.get("init_format") or ("none" if not n.get("local") else "detected after writing")
+        setup = "supports first-boot setup" if fm in ("cloudinit", "cloudinit-rpi", "systemd") else \
+            ("setup is applied if the image supports it" if n.get("local") else "no first-boot setup for this image")
+        pidesc.config(text="%s\n%s  [%s]" % (n.get("name", ""), n.get("description", ""), setup))
+
+    def pi_load():
+        pisrc.config(text="Loading...")
+
+        def w():
+            try:
+                piq.put(("repo", pi_load_repo(None, lambda m: piq.put(("log", m)))))
+            except Exception as e:
+                piq.put(("log", "ERROR: %s" % e))
+                piq.put(("repo", None))
+        threading.Thread(target=w, daemon=True).start()
+
+    def pi_model(_e=None):
+        i = picombo.current()
+        pistate["tags"] = pistate["devs"][i][1] if 0 <= i < len(pistate["devs"]) else []
+        pi_rebuild()
+
+    def pi_pick_custom():
+        f = filedialog.askopenfilename(title="Image to write", filetypes=[
+            ("Disk images", "*.img *.iso *.xz *.gz *.zip *.zst"), ("All files", "*.*")])
+        if f:
+            pistate["custom"] = {"name": os.path.basename(f), "local": f, "description": "Your own image file"}
+            picust.config(text="Using: " + f)
+            pitree.selection_set(())
+            pi_pick()
+        else:
+            pistate["custom"] = None
+            picust.config(text="")
+
+    def pi_dev():
+        sel = pdcombo.get().strip()
+        for d in drives:
+            if d[1] == sel:
+                return d[0]
+        return None
+
+    def pi_busy(b):
+        pistate["running"] = b
+        for w_ in (pbtn_write, pbtn_apply):
+            w_.config(state="disabled" if b else "normal")
+        pstop_btn.config(state="normal" if b else "disabled")
+
+    def pi_start(kind):
+        if pistate["running"]:
+            return
+        dev = pi_dev()
+        o = pi_opts()
+        err = pi_check_opts(o)
+        if err:
+            messagebox.showwarning("Pi", err)
+            return
+        if not dev:
+            messagebox.showwarning("Pi", "Select the storage (SD card) first.")
+            return
+        node = pi_selected_node()
+        if kind == "apply":
+            boot = dev[:2] + "\\" if IS_WIN else dev
+            if not p_on.get() or not os.path.isdir(boot) or not pi_detect_format(boot):
+                messagebox.showwarning("Pi", "Tick 'Apply this setup' and select the card's boot drive "
+                                       "(the small FAT32 one that contains cmdline.txt).")
+                return
+            if not messagebox.askyesno("Pi", "Write the first-boot setup onto %s ?" % boot):
+                return
+            pi_save()
+            pitxt.delete("1.0", "end")
+            try:
+                pi_write_boot_files(boot, o, node.get("init_format") if node else None, pilog)
+            except Exception as e:
+                pilog("ERROR: %s" % e)
+            return
+        if node is None:
+            messagebox.showwarning("Pi", "Pick an operating system first (or use your own image file).")
+            return
+        try:
+            info = resolve_disk(dev[:1])
+        except Exception as e:
+            messagebox.showerror("Pi", str(e))
+            return
+        if not info["safe"]:
+            messagebox.showerror("Pi", f"Refusing: disk {info['number']} is not a removable/USB/SD disk "
+                                 f"(bus: {info['bus']}, system disk: {info['system']}).")
+            return
+        if node.get("extract_size") and int(node["extract_size"]) > (info["size"] or 0):
+            messagebox.showerror("Pi", "This image is larger than the card. Nothing was written.")
+            return
+        ans = simpledialog.askstring(
+            "Confirm WRITE",
+            f"ALL DATA on disk {info['number']} will be destroyed:\n"
+            f"  {info['model']}  {fmt_size(info['size'])}  volumes {', '.join(info['letters'])}\n"
+            f"Image: {node.get('name')}\n\nType the drive letter ({dev[0]}) to confirm:")
+        if not ans or ans.strip().upper().rstrip(":") != dev[0].upper():
+            return
+        pi_save()
+        pitxt.delete("1.0", "end")
+        pistop.clear()
+        pi_busy(True)
+        verify = p_verify.get()
+        setup_on = p_on.get()
+
+        def work():
+            lg = lambda m: piq.put(("log", m))
+            pg = lambda f_, s_: piq.put(("prog", (f_, s_)))
+            tmp = None
+            try:
+                tmp = pi_prepare_image(node, lg, pg, pistop)
+                ok = write_image(tmp, info["path"], info["letters"], verify, lg, pg, pistop)
+                if not ok:
+                    lg("Write finished with errors - the card may be faulty or fake. Run the Test tab.")
+                else:
+                    if setup_on:
+                        lg("Waiting for the boot partition to appear...")
+                        boot = pi_find_boot(info["number"], 40, lg)
+                        if boot:
+                            pi_write_boot_files(boot, o, node.get("init_format"), lg)
+                        else:
+                            lg("Could not find the boot partition. Unplug and re-insert the card, then use "
+                               "'Apply setup only'.")
+                    lg("DONE. Eject the card (Eject button on the right) and put it in the Pi.")
+            except Stopped:
+                lg("Stopped by user.")
+            except Exception as e:
+                lg("ERROR: %s" % e)
+            finally:
+                if tmp and os.path.isfile(tmp):
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+            piq.put(("done", None))
+        threading.Thread(target=work, daemon=True).start()
+
+    def pi_poll():
+        try:
+            while True:
+                k, v = piq.get_nowait()
+                if k == "log":
+                    pilog(v)
+                elif k == "prog":
+                    pipb["value"] = v[0] * 100
+                    pistatus.config(text=f"{v[1]}... {v[0] * 100:.0f}%")
+                elif k == "repo":
+                    if v is None:
+                        pisrc.config(text="Could not load the list - check your internet")
+                    else:
+                        pistate["data"], src = v
+                        pistate["devs"] = pi_device_choices(v[0])
+                        picombo["values"] = [n for n, _ in pistate["devs"]]
+                        picombo.current(0)
+                        pisrc.config(text="from " + re.sub(r"^https?://([^/]+)/.*", r"\1", src))
+                        pi_model()
+                elif k == "kids":
+                    iid, kids = v
+                    if pitree.exists(iid + "!wait"):
+                        pitree.delete(iid + "!wait")
+                    pi_fill(iid, kids)
+                else:
+                    pi_busy(False)
+                    pistatus.config(text="Finished")
+        except queue.Empty:
+            pass
+        root.after(150, pi_poll)
+
+    picombo.bind("<<ComboboxSelected>>", lambda e: (pi_model(), picombo.selection_clear()))
+    pitree.bind("<<TreeviewOpen>>", pi_open)
+    pitree.bind("<<TreeviewSelect>>", pi_pick)
+    pi_poll()
+    root.after(400, pi_load)
+
+
     # ---------------- Devices panel (right) + themes ----------------
     settings = load_settings()
     theme0 = settings.get("theme") or ("Black" if settings.get("dark") else "Light")
@@ -2660,8 +3464,8 @@ def run_gui():
     theme_var = tk.StringVar(value=theme0 if theme0 in THEMES else "Light")
     style = ttk.Style()
     orig_theme = style.theme_use()
-    text_widgets = [txt, rtxt, itxt, atxt, ptxt]
-    warn_labels = [warn, iwarn]
+    text_widgets = [txt, rtxt, itxt, atxt, ptxt, pitxt]
+    warn_labels = [warn, iwarn, piwarn]
     pal_light = {"bg": style.lookup("TFrame", "background") or "#f0f0f0", "fg": "#000000", "field": "#ffffff",
                  "warn": "#b00020", "ok": "#1b7f3b", "dim": "#666666", "accent": "#3b82c4", "border": "#a0a0a0"}
 
@@ -2713,12 +3517,13 @@ def run_gui():
         tree.tag_configure("usb", foreground=pal["ok"])
         tree.tag_configure("sys", foreground=pal["warn"])
         tree.tag_configure("fix", foreground=pal["fg"])
-        for c in (combo, rcombo, icombo, tcombo):               # drop-down list colours
+        for c in (combo, rcombo, icombo, pdcombo, picombo, tcombo):               # drop-down list colours
             try:
                 c.tk.eval("set pd [ttk::combobox::PopdownWindow %s]; $pd.f.l configure -background %s "
                           "-foreground %s -selectbackground %s" % (c, pal["field"], pal["fg"], pal["accent"]))
             except tk.TclError:
                 pass
+        settings = load_settings()
         settings["theme"] = theme_var.get()
         settings.pop("dark", None)
         save_settings(settings)
@@ -2769,10 +3574,10 @@ def run_gui():
     def apply_drives(new):
         nonlocal drives
         old = {d[1]: d[0] for d in drives}
-        sel = {c: old.get(c.get()) for c in (combo, rcombo, icombo)}
+        sel = {c: old.get(c.get()) for c in (combo, rcombo, icombo, pdcombo)}
         drives = new
         vals = [d[1] for d in drives]
-        for c in (combo, rcombo, icombo):
+        for c in (combo, rcombo, icombo, pdcombo):
             c["values"] = vals
             path = sel[c]
             idx = next((i for i, d in enumerate(drives) if d[0] == path), None)
@@ -2822,7 +3627,7 @@ def run_gui():
     def pick_letter(letter):
         for i, d in enumerate(drives):
             if d[0][:1].upper() == letter.upper():
-                for c in (combo, rcombo, icombo):
+                for c in (combo, rcombo, icombo, pdcombo):
                     c.current(i)
                 custom["path"] = None
                 return
