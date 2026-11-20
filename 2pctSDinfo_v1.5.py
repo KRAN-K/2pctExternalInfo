@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 r"""
-2%SDinfo  v1.4  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
+2%SDinfo  v1.5  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
 
-GUI:   python 2pctSDinfo_v1.4.py
-CLI:   python 2pctSDinfo_v1.4.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
+GUI:   python 2pctSDinfo_v1.5.py
+CLI:   python 2pctSDinfo_v1.5.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
 
 What it does
   1. CARD INFO      label, filesystem, size, free space, serial, reader/bus type, model,
@@ -41,12 +41,19 @@ IS_WIN = sys.platform.startswith("win")
 # App identity and version history  (add a new entry at the TOP of CHANGELOG for each release)
 # ----------------------------------------------------------------------------
 APP_NAME = "2%SDinfo"
-APP_VERSION = "1.4"
+APP_VERSION = "1.5"
 APP_TAG = "v" + APP_VERSION
 APP_TITLE = f"{APP_NAME} {APP_TAG}"
 APP_TAGLINE = "SD card & USB drive checker, disk imager and deleted-file recovery"
 APP_REPO = "https://github.com/KRAN-K/2pctExternalInfo"
 CHANGELOG = [
+    ("1.5", "2026-11-19", [
+        "Partitions tab (AOMEI-style): colored disk map, partition list, format, create, delete, resize, label, drive letter",
+        "Initialize (MBR/GPT), Clean disk and Wipe disk (zero fill)",
+        "Built-in FAT32 formatter for cards above 32 GB, which Windows refuses to format as FAT32",
+        "Eject button and right-click menu in the devices panel",
+        "Operations only run on removable / USB / SD disks; system and internal disks are protected",
+    ]),
     ("1.4", "2026-11-19", [
         "Theme dropdown replaces the dark-mode checkbox: Light, Dark, Dark Gray, Crimson Eclipse (black and red), Deep Ocean (navy and cyan)",
         "Chosen theme is remembered between launches",
@@ -1299,6 +1306,299 @@ THEMES = {
 
 
 # ----------------------------------------------------------------------------
+# PARTITION MANAGER  (format / create / delete / resize / label / letter / initialize / clean / wipe / eject)
+# ----------------------------------------------------------------------------
+GiB = 1024 ** 3
+FAT32_WINDOWS_MAX = 32 * GiB          # Windows refuses to format FAT32 volumes larger than this
+LABEL_MAX = {"FAT32": 11, "EXFAT": 15, "NTFS": 32}
+
+
+def run_ps(script, timeout=900, sta=False):
+    """Run PowerShell, raise RuntimeError with the real message on failure."""
+    wrapped = ("$ErrorActionPreference='Stop'; try { " + script +
+               " } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }")
+    cmd = ["powershell", "-NoProfile", "-NonInteractive"] + (["-STA"] if sta else []) + ["-Command", wrapped]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, creationflags=hidden_flags())
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout or "PowerShell command failed").strip())
+    return (r.stdout or "").strip()
+
+
+def ps_quote(s):
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def clean_label(label, fs):
+    fs = fs.upper()
+    label = (label or "").strip()
+    if fs in ("FAT32", "FAT"):
+        label = "".join(ch for ch in label.upper() if ch not in '"*+,./:;<=>?[\\]|')
+    else:
+        label = "".join(ch for ch in label if ch not in '"*/:<>?\\|')
+    return label[:LABEL_MAX.get(fs, 32)]
+
+
+PS_PARTS = r"""
+$n={N}
+$d=Get-Disk -Number $n
+$out=@()
+foreach($p in (Get-Partition -DiskNumber $n)){
+  $v=$null; if($p.DriveLetter){ $v=Get-Volume -DriveLetter $p.DriveLetter }
+  $out+=[pscustomobject]@{Number=$p.PartitionNumber;Offset=$p.Offset;Size=$p.Size;Letter="$($p.DriveLetter)";Type="$($p.Type)";Active=[bool]$p.IsActive;Label=$v.FileSystemLabel;FS=$v.FileSystem;Free=$v.SizeRemaining}
+}
+$res=[pscustomobject]@{Number=$n;Style="$($d.PartitionStyle)";Size=$d.Size;Offline=[bool]$d.IsOffline;ReadOnly=[bool]$d.IsReadOnly;Sector=$d.LogicalSectorSize;Partitions=$out}
+ConvertTo-Json -InputObject $res -Depth 4 -Compress
+"""
+
+
+def list_partitions(number):
+    """Partition table of one disk plus the unallocated gaps ('segments')."""
+    fake = os.environ.get("SDCC_FAKE_PARTS")
+    if fake:
+        info = json.loads(fake)[str(number)]
+    else:
+        info = json.loads(run_ps(PS_PARTS.replace("{N}", str(int(number))), timeout=120))
+    parts = info.get("Partitions") or []
+    if isinstance(parts, dict):
+        parts = [parts]
+    parts = sorted(parts, key=lambda p: p.get("Offset") or 0)
+    info["Partitions"] = parts
+    info["Sector"] = info.get("Sector") or 512
+    size = info.get("Size") or 0
+    segs, pos = [], 1024 * 1024 if parts else 0
+    tail = size - (1024 * 1024 if str(info.get("Style")).upper() == "GPT" else 0)
+    for p in parts:
+        off, ln = p.get("Offset") or 0, p.get("Size") or 0
+        if off - pos >= 4 * 1024 * 1024:
+            segs.append({"kind": "free", "offset": pos, "size": off - pos})
+        segs.append({"kind": "part", "offset": off, "size": ln, "part": p})
+        pos = max(pos, off + ln)
+    if not parts and size:
+        segs.append({"kind": "free", "offset": 1024 * 1024 if size > 2 * 1024 * 1024 else 0, "size": size - 1024 * 1024})
+    elif tail - pos >= 4 * 1024 * 1024:
+        segs.append({"kind": "free", "offset": pos, "size": tail - pos})
+    info["Segments"] = segs
+    return info
+
+
+# ---- our own FAT32 formatter (Windows refuses FAT32 above 32 GB) ---------------
+def fat32_geometry(total_sectors, bps=512, spc=None):
+    size = total_sectors * bps
+    if spc is None:
+        spc = 1 if size <= 260 * MB else 8 if size <= 8 * GiB else 16 if size <= 16 * GiB else 32 if size <= 32 * GiB else 64
+    rsvd, nfats = 32, 2
+    while True:
+        tmp1 = total_sectors - rsvd
+        tmp2 = (256 * spc + nfats) // 2
+        fatsz = (tmp1 + tmp2 - 1) // tmp2
+        clusters = (total_sectors - rsvd - nfats * fatsz) // spc
+        if clusters < 65525 and spc > 1:
+            spc //= 2                                   # too few clusters for FAT32: use smaller clusters
+            continue
+        break
+    if clusters < 65525:
+        raise ValueError("Volume too small for FAT32 (needs at least ~33 MB).")
+    if clusters > 0x0FFFFFF5:
+        raise ValueError("Volume too large for these cluster settings; choose a bigger cluster size.")
+    return {"spc": spc, "rsvd": rsvd, "nfats": nfats, "fatsz": fatsz, "clusters": clusters, "bps": bps}
+
+
+def format_fat32(target, size_bytes, label="", cluster_bytes=None, hidden_sectors=0, bps=512,
+                 log=print, progress=None, stop=None):
+    """Quick-format `target` (volume handle path or a file) as FAT32. Offsets are partition-relative."""
+    progress = progress or (lambda f, s: None)
+    total = size_bytes // bps
+    spc = (cluster_bytes // bps) if cluster_bytes else None
+    g = fat32_geometry(total, bps, spc)
+    spc, rsvd, nfats, fatsz = g["spc"], g["rsvd"], g["nfats"], g["fatsz"]
+    lab = (clean_label(label, "FAT32") or "NO NAME").ljust(11)[:11].encode("ascii", "replace")
+    vol_id = random.getrandbits(32)
+
+    bs = bytearray(bps)
+    bs[0:3] = b"\xEB\x58\x90"
+    bs[3:11] = b"MSWIN4.1"
+    struct.pack_into("<HBHBHHBHHHII", bs, 11, bps, spc, rsvd, nfats, 0, 0, 0xF8, 0, 63, 255, hidden_sectors & 0xFFFFFFFF, total)
+    struct.pack_into("<IHHIHH", bs, 36, fatsz, 0, 0, 2, 1, 6)
+    bs[64] = 0x80
+    bs[66] = 0x29
+    struct.pack_into("<I", bs, 67, vol_id)
+    bs[71:82] = lab
+    bs[82:90] = b"FAT32   "
+    bs[510:512] = b"\x55\xAA"
+
+    fsinfo = bytearray(bps)
+    struct.pack_into("<I", fsinfo, 0, 0x41615252)
+    struct.pack_into("<I", fsinfo, 484, 0x61417272)
+    struct.pack_into("<II", fsinfo, 488, g["clusters"] - 1, 3)
+    fsinfo[510:512] = b"\x55\xAA"
+    sec2 = bytearray(bps)
+    sec2[510:512] = b"\x55\xAA"
+
+    fat0 = bytearray(bps)
+    struct.pack_into("<III", fat0, 0, 0x0FFFFFF8, 0x0FFFFFFF, 0x0FFFFFFF)
+    root = bytearray(spc * bps)
+    if label.strip():
+        root[0:11] = lab
+        root[11] = 0x08
+
+    zero_sectors = rsvd + nfats * fatsz + spc
+    with open(target, "r+b", buffering=0) as f:
+        z = bytes(4 * MB)
+        left, pos = zero_sectors * bps, 0
+        while left > 0:
+            if stop is not None and stop.is_set():
+                raise Stopped()
+            n = min(len(z), left)
+            n -= n % bps or 0
+            n = max(n, bps)
+            f.seek(pos)
+            f.write(z[:n])
+            pos += n
+            left -= n
+            progress(min(1.0, pos / (zero_sectors * bps)), "Formatting")
+        for sec, data in ((0, bs), (1, fsinfo), (2, sec2), (6, bs), (7, fsinfo), (8, sec2),
+                          (rsvd, fat0), (rsvd + fatsz, fat0), (rsvd + nfats * fatsz, root)):
+            f.seek(sec * bps)
+            f.write(bytes(data))
+        try:
+            f.flush()
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    log(f"FAT32 written: {fmt_size(size_bytes)}, cluster {fmt_size(spc * bps)}, "
+        f"{g['clusters']} clusters, FAT {fmt_size(fatsz * bps)} x{nfats}.")
+    return g
+
+
+def wipe_disk(path, letters=(), log=print, progress=None, stop=None):
+    """Overwrite an entire physical disk with zeros (all data and partition tables)."""
+    stop = stop or threading.Event()
+    progress = progress or (lambda f, s: None)
+    rd = RawReader(path)
+    size = rd.size
+    rd.close()
+    locked = LockedDisk(list(letters)) if (IS_WIN and letters) else None
+    if locked:
+        locked.__enter__()
+    t0 = time.time()
+    try:
+        with open(path, "r+b", buffering=0) as f:
+            z = bytes(4 * MB)
+            pos = 0
+            while pos < size:
+                if stop.is_set():
+                    raise Stopped()
+                n = min(len(z), size - pos)
+                f.seek(pos)
+                f.write(z[:n])
+                pos += n
+                progress(pos / size, "Wiping")
+            _refresh_partitions(f)
+    finally:
+        if locked:
+            locked.__exit__()
+    log(f"Zero-filled {fmt_size(size)} in {time.time() - t0:.0f} s.")
+
+
+def assign_letter(disk, part):
+    return run_ps(
+        "Add-PartitionAccessPath -DiskNumber %d -PartitionNumber %d -AssignDriveLetter; "
+        "(Get-Partition -DiskNumber %d -PartitionNumber %d).DriveLetter" % (disk, part, disk, part)).strip()[:1]
+
+
+def op_format(disk, part, fs, label, cluster=None, quick=True, log=print, progress=None, stop=None):
+    """Format partition `part` (dict from list_partitions) with FAT32 / exFAT / NTFS."""
+    fs = fs.upper()
+    label = clean_label(label, fs)
+    letter = (part.get("Letter") or "").strip() or assign_letter(disk, part["Number"])
+    if not letter:
+        raise RuntimeError("Could not give the partition a drive letter.")
+    size = part.get("Size") or 0
+    if fs == "FAT32" and size > FAT32_WINDOWS_MAX:
+        log(f"{fmt_size(size)} is above Windows' 32 GB FAT32 limit: using the built-in FAT32 formatter.")
+        with LockedDisk([letter]):
+            format_fat32("\\\\.\\%s:" % letter, size, label, cluster, (part.get("Offset") or 0) // 512,
+                         log=log, progress=progress, stop=stop)
+        try:
+            run_ps("Set-Partition -DiskNumber %d -PartitionNumber %d -MbrType FAT32" % (disk, part["Number"]))
+        except RuntimeError:
+            pass                                       # GPT disks have no MBR type; harmless
+    else:
+        cmd = "Format-Volume -DriveLetter %s -FileSystem %s -NewFileSystemLabel %s -Force" % (letter, fs, ps_quote(label))
+        if cluster:
+            cmd += " -AllocationUnitSize %d" % cluster
+        if not quick:
+            cmd += " -Full"
+        log("Formatting with Windows (%s, %s)..." % (fs, "full" if not quick else "quick"))
+        run_ps(cmd)
+    return letter
+
+
+def op_delete(disk, part):
+    run_ps("Remove-Partition -DiskNumber %d -PartitionNumber %d -Confirm:$false" % (disk, part["Number"]))
+
+
+def op_create(disk, offset, size, fs, label, cluster=None, quick=True, log=print, progress=None, stop=None):
+    out = run_ps("$p=New-Partition -DiskNumber %d -Offset %d -Size %d -AssignDriveLetter; "
+                 "Start-Sleep -Seconds 2; \"$($p.PartitionNumber) $($p.DriveLetter)\"" % (disk, offset, size))
+    num, _, letter = out.partition(" ")
+    part = {"Number": int(num), "Letter": letter.strip(), "Size": size, "Offset": offset}
+    log(f"Partition {num} created ({fmt_size(size)}). Formatting as {fs}...")
+    return op_format(disk, part, fs, label, cluster, quick, log, progress, stop)
+
+
+def op_resize(disk, part, new_size):
+    run_ps("Resize-Partition -DiskNumber %d -PartitionNumber %d -Size %d" % (disk, part["Number"], new_size))
+
+
+def supported_size(disk, part):
+    out = run_ps("$s=Get-PartitionSupportedSize -DiskNumber %d -PartitionNumber %d; \"$($s.SizeMin) $($s.SizeMax)\"" % (disk, part["Number"]))
+    a, b = out.split()
+    return int(a), int(b)
+
+
+def op_label(letter, label, fs):
+    run_ps("Set-Volume -DriveLetter %s -NewFileSystemLabel %s" % (letter, ps_quote(clean_label(label, fs or "NTFS"))))
+
+
+def op_letter(disk, part, new_letter):
+    run_ps("Set-Partition -DiskNumber %d -PartitionNumber %d -NewDriveLetter %s" % (disk, part["Number"], new_letter))
+
+
+def op_initialize(disk, style):
+    run_ps("Initialize-Disk -Number %d -PartitionStyle %s" % (disk, style))
+
+
+def op_clean(disk):
+    run_ps("Clear-Disk -Number %d -RemoveData -RemoveOEM -Confirm:$false" % disk)
+
+
+def eject_disk(number, letters, log=print):
+    """Safely remove a removable disk: shell eject for each volume, then fall back to taking it offline."""
+    letters = [l.upper() for l in letters]
+    for L in letters:
+        try:
+            run_ps("$it=(New-Object -ComObject Shell.Application).Namespace(17).ParseName('%s:'); "
+                   "if(-not $it){ throw 'Drive %s: not found' }; $it.InvokeVerb('Eject')" % (L, L), sta=True, timeout=60)
+        except RuntimeError as e:
+            log(f"  shell eject of {L}: failed ({e})")
+    for _ in range(14):
+        time.sleep(0.5)
+        left = [L for L in letters if os.path.exists(L + ":\\")]
+        if not left:
+            log("Ejected. It is now safe to unplug the device.")
+            return True
+    log("Shell eject did not release the drive; taking the disk offline instead...")
+    try:
+        run_ps("Set-Disk -Number %d -IsOffline $true" % number)
+        log("Disk is offline. It is now safe to unplug the device.")
+        return True
+    except RuntimeError as e:
+        raise RuntimeError("Could not eject: something is still using the drive. Close Explorer windows, "
+                           "backup tools and anything reading it, then try again. (%s)" % e)
+
+
+# ----------------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------------
 def run_cli(args):
@@ -1339,10 +1639,12 @@ def run_gui():
     tab = ttk.Frame(nb)
     rtab = ttk.Frame(nb)
     itab = ttk.Frame(nb)
+    ptab = ttk.Frame(nb)
     atab = ttk.Frame(nb)
     nb.add(tab, text="  Test & Info  ")
     nb.add(rtab, text="  Recover deleted files  ")
     nb.add(itab, text="  Disk Imager  ")
+    nb.add(ptab, text="  Partitions  ")
     nb.add(atab, text="  About  ")
     q = queue.Queue()
     stop_evt = threading.Event()
@@ -1852,13 +2154,502 @@ def run_gui():
             atxt.insert("end", f"   • {ln_}\n")
     atxt.config(state="disabled")
 
+    # ---------------- Partitions tab (AOMEI-style) ----------------
+    pstate = {"disk": None, "info": None, "sel": None, "busy": False}
+    devcache = {"list": []}
+    pq = queue.Queue()
+    pstop = threading.Event()
+    pal_cur = {"p": {}}
+
+    ptop = ttk.Frame(ptab, padding=(8, 8, 8, 0))
+    ptop.pack(fill="x")
+    ttk.Label(ptop, text="Disk:").pack(side="left")
+    pdisk = ttk.Combobox(ptop, state="readonly", width=50)
+    pdisk.pack(side="left", padx=6)
+    pinfo = ttk.Label(ptop, text="")
+    pinfo.pack(side="left", padx=8)
+    pbody = ttk.Frame(ptab)
+    pbody.pack(fill="both", expand=True)
+    side = ttk.Frame(pbody, padding=8)
+    side.pack(side="left", fill="y")
+    pmain = ttk.Frame(pbody, padding=(0, 8, 8, 8))
+    pmain.pack(side="left", fill="both", expand=True)
+    pcanvas = tk.Canvas(pmain, height=86, highlightthickness=0)
+    pcanvas.pack(fill="x")
+    ptree = ttk.Treeview(pmain, columns=("label", "fs", "cap", "free", "type", "start"), height=7, selectmode="browse")
+    for c_, t_, w_ in (("#0", "Partition", 110), ("label", "Label", 110), ("fs", "File system", 80),
+                       ("cap", "Capacity", 85), ("free", "Free", 85), ("type", "Type", 100), ("start", "Start", 85)):
+        ptree.heading(c_, text=t_)
+        ptree.column(c_, width=w_, stretch=(c_ == "#0"))
+    ptree.pack(fill="x", pady=(8, 0))
+    pprog = ttk.Progressbar(pmain, maximum=100)
+    pprog.pack(fill="x", pady=(8, 0))
+    pstatus = ttk.Label(pmain, text="Select a disk. Operations apply only to removable / USB / SD disks.")
+    pstatus.pack(anchor="w")
+    ptxt = tk.Text(pmain, font=("Consolas", 10), wrap="word", height=8)
+    ptxt.pack(fill="both", expand=True, pady=(4, 0))
+
+    def plog(m):
+        ptxt.insert("end", m + "\n")
+        ptxt.see("end")
+
+    def disk_entry(n):
+        for d in devcache["list"]:
+            if d.get("Number") == n:
+                return d
+        return None
+
+    def disk_safe(n):
+        d = disk_entry(n)
+        return bool(d) and str(d.get("Bus", "")).upper() in SAFE_BUS and not d.get("System")
+
+    def disk_letters(n):
+        d = disk_entry(n) or {}
+        return [v.get("Letter") for v in (d.get("Volumes") or []) if v.get("Letter")]
+
+    def sel_seg():
+        i = pstate["sel"]
+        segs = (pstate["info"] or {}).get("Segments") or []
+        return segs[i] if i is not None and 0 <= i < len(segs) else None
+
+    # --- map drawing
+    def fs_color(fs, p):
+        return {"FAT32": p.get("accent", "#3b82c4"), "EXFAT": "#7b61c4", "NTFS": "#2e8b8b",
+                "FAT": "#c47b3b"}.get((fs or "").upper(), p.get("dim", "#888888"))
+
+    def redraw_map(_e=None):
+        c = pcanvas
+        c.delete("all")
+        p = pal_cur["p"] or pal_light
+        c.configure(bg=p["bg"])
+        info = pstate["info"]
+        W = max(200, c.winfo_width())
+        if not info or not info.get("Segments"):
+            c.create_text(W // 2, 43, text="No disk loaded", fill=p.get("dim", "#888"))
+            return
+        total = max(1, info.get("Size") or 1)
+        x = 4
+        usable = W - 8
+        MINW = 96
+        widths = [max(MINW, usable * sg["size"] / total) for sg in info["Segments"]]
+        over = sum(widths) - usable
+        if over > 0:                                      # shrink the big blocks, keep small ones readable
+            room = sum(w - MINW for w in widths)
+            if room > 0:
+                widths = [w - (w - MINW) / room * over if w > MINW else w for w in widths]
+        for i, sg in enumerate(info["Segments"]):
+            w_ = int(widths[i])
+            if sg["kind"] == "free":
+                fill, line = p["field"], p.get("border", "#555")
+                title, sub = ("Unallocated" if w_ >= 120 else "Free"), fmt_size(sg["size"])
+            else:
+                pt = sg["part"]
+                fill, line = fs_color(pt.get("FS"), p), p.get("border", "#555")
+                title = (pt.get("Letter") + ":  " if pt.get("Letter") else "") + (pt.get("Label") or "")
+                sub = "%s  %s" % (pt.get("FS") or "RAW", fmt_size(sg["size"]))
+            sel = pstate["sel"] == i
+            c.create_rectangle(x, 6, x + w_ - 3, 80, fill=fill, outline=p["accent"] if sel else line, width=3 if sel else 1)
+            if sel:
+                c.create_rectangle(x + 2, 8, x + w_ - 5, 78, outline=p["fg"], width=1, dash=(3, 3))
+            fg = "#ffffff" if sg["kind"] == "part" else p["fg"]
+            c.create_text(x + 8, 24, text=title.strip() or "Partition %s" % sg["part"].get("Number", ""), anchor="w", fill=fg,
+                          font=("Segoe UI", 10, "bold"), width=max(30, w_ - 20))
+            c.create_text(x + 8, 50, text=sub, anchor="w", fill=fg, font=("Segoe UI", 9), width=max(30, w_ - 20))
+            sg["_x"] = (x, x + w_ - 3)
+            x += w_
+
+    def map_click(e):
+        info = pstate["info"]
+        if not info:
+            return
+        for i, sg in enumerate(info["Segments"]):
+            a, b = sg.get("_x", (0, 0))
+            if a <= e.x <= b:
+                pstate["sel"] = i
+                ptree.selection_set("s%d" % i)
+                redraw_map()
+                update_buttons()
+                return
+
+    pcanvas.bind("<Configure>", redraw_map)
+    pcanvas.bind("<Button-1>", map_click)
+
+    def tree_pick(_e=None):
+        s_ = ptree.selection()
+        if s_ and s_[0].startswith("s"):
+            pstate["sel"] = int(s_[0][1:])
+            redraw_map()
+            update_buttons()
+
+    ptree.bind("<<TreeviewSelect>>", tree_pick)
+
+    def render():
+        info = pstate["info"]
+        ptree.delete(*ptree.get_children())
+        if not info:
+            redraw_map()
+            return
+        for i, sg in enumerate(info["Segments"]):
+            if sg["kind"] == "free":
+                ptree.insert("", "end", iid="s%d" % i, text="Unallocated", values=("", "", fmt_size(sg["size"]), "", "", fmt_size(sg["offset"])))
+            else:
+                pt = sg["part"]
+                ptree.insert("", "end", iid="s%d" % i,
+                             text="%s%s" % ((pt.get("Letter") + ":  ") if pt.get("Letter") else "", "Partition %s" % pt.get("Number")),
+                             values=(pt.get("Label") or "", pt.get("FS") or "RAW", fmt_size(sg["size"]),
+                                     fmt_size(pt.get("Free")) if pt.get("Free") is not None else "", pt.get("Type") or "",
+                                     fmt_size(sg["offset"])))
+        n = info.get("Number")
+        safe = disk_safe(n)
+        pinfo.config(text="%s  |  %s  |  %s  |  %s" % (fmt_size(info.get("Size")), info.get("Style"),
+                                                      "Offline" if info.get("Offline") else "Online",
+                                                      "SAFE TO MODIFY" if safe else "PROTECTED"))
+        pstate["sel"] = None
+        redraw_map()
+        update_buttons()
+
+    # --- loading
+    def fill_disk_combo():
+        vals = []
+        for d in devcache["list"]:
+            tag = "removable" if (str(d.get("Bus", "")).upper() in SAFE_BUS and not d.get("System")) else "protected"
+            vals.append("Disk %s  %s  %s  %.1f GB  [%s]" % (d.get("Number"), d.get("Name") or "", d.get("Bus", ""),
+                                                           (d.get("Size") or 0) / 1e9, tag))
+        pdisk["values"] = vals
+        cur = pstate["disk"]
+        match = next((v for v in vals if cur is not None and v.startswith("Disk %s " % cur)), None)
+        if match:
+            pdisk.set(match)
+            return
+        if cur is not None:                               # the disk went away
+            pstate["disk"], pstate["info"] = None, None
+            pdisk.set("")
+            render()
+        if vals and not pstate["busy"]:
+            i = next((k for k, v in enumerate(vals) if "[removable]" in v), 0)
+            pdisk.current(i)
+            pstate["disk"] = devcache["list"][i].get("Number")
+            load_disk()
+
+    def load_disk(_e=None):
+        v = pdisk.get()
+        if v.startswith("Disk "):
+            pstate["disk"] = int(v.split()[1])
+        n = pstate["disk"]
+        if n is None:
+            return
+        pstatus.config(text="Reading partition table...")
+
+        def work():
+            try:
+                pq.put(("loaded", list_partitions(n)))
+            except Exception as e:
+                pq.put(("log", "Could not read disk %s: %s" % (n, e)))
+                pq.put(("loaded", None))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    pdisk.bind("<<ComboboxSelected>>", load_disk)
+
+    # --- dialogs
+    def form(title, fields, ok_text="OK"):
+        dlg = tk.Toplevel(root)
+        dlg.title(title)
+        dlg.transient(root)
+        dlg.resizable(False, False)
+        dlg.configure(bg=pal_cur["p"].get("bg", pal_light["bg"]))
+        frm = ttk.Frame(dlg, padding=14)
+        frm.pack()
+        vars_ = {}
+        for r_, f in enumerate(fields):
+            kind = f[0]
+            if kind == "note":
+                ttk.Label(frm, text=f[1], wraplength=380, justify="left").grid(row=r_, column=0, columnspan=2, sticky="w", pady=(0, 6))
+                continue
+            key, label = f[1], f[2]
+            if kind == "check":
+                v = tk.BooleanVar(value=f[3])
+                ttk.Checkbutton(frm, text=label, variable=v).grid(row=r_, column=0, columnspan=2, sticky="w", pady=3)
+            else:
+                ttk.Label(frm, text=label).grid(row=r_, column=0, sticky="w", pady=3, padx=(0, 10))
+                if kind == "entry":
+                    v = tk.StringVar(value=f[3])
+                    ttk.Entry(frm, textvariable=v, width=27).grid(row=r_, column=1, sticky="w")
+                else:
+                    v = tk.StringVar(value=f[4])
+                    ttk.Combobox(frm, textvariable=v, values=f[3], state="readonly", width=25).grid(row=r_, column=1, sticky="w")
+            vars_[key] = v
+        out = {}
+
+        def ok():
+            out.update({k: v.get() for k, v in vars_.items()})
+            out["_ok"] = True
+            dlg.destroy()
+
+        bb = ttk.Frame(frm)
+        bb.grid(row=len(fields), column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(bb, text=ok_text, command=ok).pack(side="left", padx=4)
+        ttk.Button(bb, text="Cancel", command=dlg.destroy).pack(side="left")
+        dlg.update_idletasks()
+        dlg.geometry("+%d+%d" % (root.winfo_rootx() + 140, root.winfo_rooty() + 120))
+        dlg.grab_set()
+        root.wait_window(dlg)
+        return out if out.get("_ok") else None
+
+    def confirm_typed(what, expected):
+        a = simpledialog.askstring(APP_NAME, "%s\n\nType  %s  to confirm:" % (what, expected), parent=root)
+        return bool(a) and a.strip().upper().rstrip(":") == str(expected).upper()
+
+    # --- running operations
+    def run_op(title, fn):
+        if pstate["busy"]:
+            return
+        pstate["busy"] = True
+        pstop.clear()
+        pprog["value"] = 0
+        update_buttons()
+        plog("=== %s ===" % title)
+
+        def work():
+            lg = lambda m: pq.put(("log", m))
+            pg = lambda f, s_: pq.put(("prog", (f, s_)))
+            try:
+                res = fn(lg, pg)
+                pq.put(("log", "DONE: %s" % (res or title)))
+            except Stopped:
+                pq.put(("log", "Stopped by user."))
+            except Exception as e:
+                pq.put(("log", "ERROR: %s" % e))
+            pq.put(("done", None))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def ppoll():
+        try:
+            while True:
+                k, v = pq.get_nowait()
+                if k == "log":
+                    plog(v)
+                elif k == "prog":
+                    pprog["value"] = v[0] * 100
+                    pstatus.config(text="%s... %.0f%%" % (v[1], v[0] * 100))
+                elif k == "loaded":
+                    pstate["info"] = v
+                    pstatus.config(text="Ready.")
+                    render()
+                elif k == "done":
+                    pstate["busy"] = False
+                    pprog["value"] = 0
+                    pstatus.config(text="Finished.")
+                    update_buttons()
+                    load_disk()
+                    dev_wake.set()
+        except queue.Empty:
+            pass
+        root.after(150, ppoll)
+
+    def cur_part():
+        sg = sel_seg()
+        return sg["part"] if sg and sg["kind"] == "part" else None
+
+    def need_safe():
+        n = pstate["disk"]
+        if n is None or not disk_safe(n):
+            messagebox.showerror(APP_NAME, "This disk is protected (system or internal). Only removable, USB and SD disks can be changed.")
+            return None
+        return n
+
+    # --- commands
+    def cmd_format():
+        n, pt = need_safe(), cur_part()
+        if n is None or not pt:
+            return
+        cur_fs = (pt.get("FS") or "").upper()
+        big = (pt.get("Size") or 0) > FAT32_WINDOWS_MAX
+        r = form("Format partition", [
+            ("note", "Format erases ALL data on %s partition %s (%s). %s" % (
+                (pt.get("Letter") + ":") if pt.get("Letter") else "", pt.get("Number"), fmt_size(pt.get("Size")),
+                "FAT32 above 32 GB uses the built-in formatter (Windows refuses it)." if big else "")),
+            ("combo", "fs", "File system:", ["FAT32", "exFAT", "NTFS"], {"FAT32": "FAT32", "EXFAT": "exFAT", "NTFS": "NTFS"}.get(cur_fs, "exFAT" if big else "FAT32")),
+            ("entry", "label", "Label:", pt.get("Label") or ""),
+            ("combo", "cluster", "Cluster size:", ["Default", "512", "1024", "2048", "4096", "8192", "16384", "32768", "65536"], "Default"),
+            ("check", "quick", "Quick format", True)], "Format")
+        if not r:
+            return
+        who = pt.get("Letter") or str(pt.get("Number"))
+        if not confirm_typed("ALL DATA on partition %s will be destroyed." % who, who):
+            return
+        cl = None if r["cluster"] == "Default" else int(r["cluster"])
+        run_op("Format %s as %s" % (who, r["fs"]),
+               lambda lg, pg: "formatted %s:" % op_format(n, pt, r["fs"], r["label"], cl, r["quick"], lg, pg, pstop))
+
+    def cmd_delete():
+        n, pt = need_safe(), cur_part()
+        if n is None or not pt:
+            return
+        who = pt.get("Letter") or str(pt.get("Number"))
+        if not confirm_typed("Partition %s (%s) and ALL its data will be deleted." % (who, fmt_size(pt.get("Size"))), who):
+            return
+        run_op("Delete partition %s" % who, lambda lg, pg: op_delete(n, pt) or "partition deleted")
+
+    def cmd_create():
+        n, sg = need_safe(), sel_seg()
+        if n is None or not sg or sg["kind"] != "free":
+            return
+        mx = sg["size"] // (1024 * 1024)
+        r = form("Create partition", [
+            ("note", "Unallocated space: %s" % fmt_size(sg["size"])),
+            ("entry", "mb", "Size (MB):", str(mx - 2)),
+            ("combo", "fs", "File system:", ["FAT32", "exFAT", "NTFS"], "exFAT" if sg["size"] > FAT32_WINDOWS_MAX else "FAT32"),
+            ("entry", "label", "Label:", ""),
+            ("combo", "cluster", "Cluster size:", ["Default", "4096", "8192", "16384", "32768", "65536"], "Default")], "Create")
+        if not r:
+            return
+        try:
+            size = int(float(r["mb"]) * 1024 * 1024)
+        except ValueError:
+            return messagebox.showerror(APP_NAME, "Size must be a number of megabytes.")
+        if size < 33 * 1024 * 1024 or size > sg["size"]:
+            return messagebox.showerror(APP_NAME, "Size must be between 33 MB and %d MB." % mx)
+        cl = None if r["cluster"] == "Default" else int(r["cluster"])
+        run_op("Create %s partition" % r["fs"],
+               lambda lg, pg: "created %s:" % op_create(n, sg["offset"], size, r["fs"], r["label"], cl, True, lg, pg, pstop))
+
+    def cmd_resize():
+        n, pt = need_safe(), cur_part()
+        if n is None or not pt:
+            return
+        if (pt.get("FS") or "").upper() != "NTFS":
+            return messagebox.showinfo(APP_NAME, "Windows can only resize NTFS partitions.\n\nFor FAT32 / exFAT: back up, delete the partition, "
+                                       "then create a new one with the size you want.")
+        try:
+            mn, mx = supported_size(n, pt)
+        except Exception as e:
+            return messagebox.showerror(APP_NAME, "Cannot resize: %s" % e)
+        r = form("Resize partition", [("note", "Allowed size: %d MB to %d MB" % (mn // 1048576 + 1, mx // 1048576)),
+                                      ("entry", "mb", "New size (MB):", str(mx // 1048576))], "Resize")
+        if not r:
+            return
+        try:
+            size = int(float(r["mb"]) * 1048576)
+        except ValueError:
+            return
+        if size < mn or size > mx:
+            return messagebox.showerror(APP_NAME, "Outside the allowed range.")
+        run_op("Resize partition", lambda lg, pg: op_resize(n, pt, size) or "resized")
+
+    def cmd_label():
+        n, pt = need_safe(), cur_part()
+        if n is None or not pt:
+            return
+        if not pt.get("Letter"):
+            return messagebox.showinfo(APP_NAME, "This partition has no drive letter. Use Change Drive Letter first.")
+        r = form("Change label", [("entry", "label", "New label:", pt.get("Label") or "")], "Apply")
+        if r:
+            run_op("Change label", lambda lg, pg: op_label(pt["Letter"], r["label"], pt.get("FS")) or "label changed")
+
+    def cmd_letter():
+        n, pt = need_safe(), cur_part()
+        if n is None or not pt:
+            return
+        used = {l for d in devcache["list"] for l in [v.get("Letter") for v in (d.get("Volumes") or [])] if l}
+        free = [c for c in "DEFGHIJKLMNOPQRSTUVWXYZ" if c not in used]
+        r = form("Change drive letter", [("combo", "letter", "New letter:", free, free[0] if free else "")], "Apply")
+        if r and r["letter"]:
+            run_op("Change drive letter", lambda lg, pg: op_letter(n, pt, r["letter"]) or "letter changed")
+
+    def cmd_init():
+        n = need_safe()
+        if n is None:
+            return
+        if (pstate["info"] or {}).get("Partitions"):
+            return messagebox.showinfo(APP_NAME, "The disk still has partitions. Use Clean Disk first.")
+        r = form("Initialize disk", [("note", "Choose the partition style. MBR suits SD cards, cameras and Raspberry Pi; GPT suits disks over 2 TB."),
+                                     ("combo", "style", "Style:", ["MBR", "GPT"], "MBR")], "Initialize")
+        if r:
+            run_op("Initialize disk %d as %s" % (n, r["style"]), lambda lg, pg: op_initialize(n, r["style"]) or "initialized")
+
+    def cmd_clean():
+        n = need_safe()
+        if n is None:
+            return
+        if not confirm_typed("ALL partitions and data on disk %d will be removed." % n, n):
+            return
+        run_op("Clean disk %d" % n, lambda lg, pg: op_clean(n) or "disk cleaned")
+
+    def cmd_wipe():
+        n = need_safe()
+        if n is None:
+            return
+        if not confirm_typed("Disk %d will be completely overwritten with zeros. This is slow and cannot be undone." % n, n):
+            return
+        letters = disk_letters(n)
+        run_op("Wipe disk %d" % n, lambda lg, pg: wipe_disk("\\\\.\\PhysicalDrive%d" % n, letters, lg, pg, pstop) or "disk wiped")
+
+    def cmd_eject():
+        eject_selected(pstate["disk"])
+
+    # --- sidebar
+    sbtn = {}
+
+    def sect(text):
+        ttk.Label(side, text=text, font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(10, 2))
+
+    def sb(name, text, cmd):
+        b_ = ttk.Button(side, text=text, command=cmd, width=24)
+        b_.pack(fill="x", pady=1)
+        sbtn[name] = b_
+
+    sect("Partition operations")
+    sb("format", "Format Partition...", cmd_format)
+    sb("delete", "Delete Partition...", cmd_delete)
+    sb("create", "Create Partition...", cmd_create)
+    sb("resize", "Resize Partition...", cmd_resize)
+    sb("label", "Change Label...", cmd_label)
+    sb("letter", "Change Drive Letter...", cmd_letter)
+    sect("Disk operations")
+    sb("init", "Initialize Disk (MBR/GPT)...", cmd_init)
+    sb("clean", "Clean Disk...", cmd_clean)
+    sb("wipe", "Wipe Disk (zero fill)...", cmd_wipe)
+    sb("eject", "Eject Disk", cmd_eject)
+    sect("")
+    sb("refresh", "Refresh", lambda: (dev_wake.set(), load_disk()))
+    ttk.Button(side, text="Stop", command=pstop.set, width=24).pack(fill="x", pady=(8, 1))
+
+    def update_buttons():
+        busy = pstate["busy"]
+        info = pstate["info"] or {}
+        n = pstate["disk"]
+        safe = n is not None and disk_safe(n)
+        sg = sel_seg()
+        pt = sg["part"] if sg and sg["kind"] == "part" else None
+        has_parts = bool(info.get("Partitions"))
+        raw = str(info.get("Style", "")).upper() in ("RAW", "") and not has_parts
+
+        def en(name, cond):
+            sbtn[name].config(state="normal" if (cond and not busy) else "disabled")
+
+        en("format", safe and pt is not None)
+        en("delete", safe and pt is not None)
+        en("create", safe and sg is not None and sg["kind"] == "free" and not raw)
+        en("resize", safe and pt is not None and (pt.get("FS") or "").upper() == "NTFS")
+        en("label", safe and pt is not None and bool(pt.get("Letter")))
+        en("letter", safe and pt is not None)
+        en("init", safe and not has_parts)
+        en("clean", safe and has_parts)
+        en("wipe", safe)
+        en("eject", safe)
+        en("refresh", True)
+
+    ppoll()
+
     # ---------------- Devices panel (right) + themes ----------------
     settings = load_settings()
     theme0 = settings.get("theme") or ("Dark" if settings.get("dark") else "Light")
     theme_var = tk.StringVar(value=theme0 if theme0 in THEMES else "Light")
     style = ttk.Style()
     orig_theme = style.theme_use()
-    text_widgets = [txt, rtxt, itxt, atxt]
+    text_widgets = [txt, rtxt, itxt, atxt, ptxt]
     warn_labels = [warn, iwarn]
     pal_light = {"bg": style.lookup("TFrame", "background") or "#f0f0f0", "fg": "#000000", "field": "#ffffff",
                  "warn": "#b00020", "ok": "#1b7f3b", "dim": "#666666", "accent": "#3b82c4", "border": "#a0a0a0"}
@@ -1895,6 +2686,12 @@ def run_gui():
             style.configure("Treeview", rowheight=22)
             pal = pal_light
         root.configure(bg=pal["bg"])
+        pal_cur["p"] = pal
+        redraw_map()
+        try:
+            tmenu.configure(bg=pal["field"], fg=pal["fg"], activebackground=pal["accent"], activeforeground="#ffffff")
+        except tk.TclError:
+            pass
         for t in text_widgets:
             t.configure(bg=pal["field"], fg=pal["fg"], insertbackground=pal["fg"],
                         selectbackground=pal["accent"], selectforeground="#ffffff",
@@ -1932,8 +2729,8 @@ def run_gui():
     tree.column("size", width=125, stretch=False)
     tree.pack(fill="both", expand=True, padx=8, pady=6)
     dev_hint = tk.Label(right, justify="left", wraplength=320, anchor="w",
-                        text="Click a device to select it in every tab.\nGreen = removable (safe to write), "
-                             "red = system disk.")
+                        text="Click a device to select it in every tab. Right-click for Eject.\n"
+                             "Red = system disk (protected). Other colors = removable / USB / SD.")
     dev_hint.pack(fill="x", padx=8)
     dev_btns = ttk.Frame(right, padding=8)
     dev_btns.pack(fill="x")
@@ -1977,12 +2774,24 @@ def run_gui():
     def device_poll():
         try:
             while True:
+                kind_, msg_ = eq.get_nowait()
+                dev_msg.config(text=msg_)
+                if kind_ == "err":
+                    messagebox.showerror(APP_NAME, msg_)
+                elif kind_ == "ok":
+                    dev_wake.set()
+        except queue.Empty:
+            pass
+        try:
+            while True:
                 devs, drv = dq.get_nowait()
                 sig = json.dumps([devs, [d[:2] for d in drv]], sort_keys=True, default=str)
                 if sig != dev_state["sig"]:
                     dev_state["sig"] = sig
                     sel_item = tree.selection()
+                    devcache["list"] = devs
                     fill_tree(devs)
+                    fill_disk_combo()
                     apply_drives(drv)
                     if sel_item and tree.exists(sel_item[0]):
                         tree.selection_set(sel_item[0])
@@ -2012,6 +2821,7 @@ def run_gui():
         if not s:
             return
         iid = s[0]
+        follow_disk(tree_disk())
         if iid.startswith("v"):
             pick_letter(iid[1:])
         else:
@@ -2021,6 +2831,62 @@ def run_gui():
 
     tree.bind("<<TreeviewSelect>>", on_tree_select)
     ttk.Button(dev_btns, text="Refresh now", command=dev_wake.set).pack(side="left")
+    ttk.Button(dev_btns, text="Eject", command=lambda: eject_selected()).pack(side="left", padx=6)
+    dev_msg = ttk.Label(right, text="", wraplength=340, justify="left")
+    dev_msg.pack(fill="x", padx=8)
+    eq = queue.Queue()
+
+    def tree_disk():
+        s_ = tree.selection()
+        if not s_:
+            return None
+        iid = s_[0]
+        if iid.startswith("v"):
+            iid = tree.parent(iid)
+        return int(iid[1:]) if iid.startswith("d") and iid[1:].isdigit() else None
+
+    def eject_selected(n=None):
+        n = tree_disk() if n is None else n
+        if n is None:
+            return messagebox.showinfo(APP_NAME, "Click a device in the list first.")
+        d = disk_entry(n)
+        if not d or not disk_safe(n):
+            return messagebox.showerror(APP_NAME, "Only removable, USB and SD disks can be ejected. System and internal disks are protected.")
+        letters = disk_letters(n)
+        if not messagebox.askyesno(APP_NAME, "Eject disk %d (%s, %.1f GB)?\nVolumes: %s\n\nMake sure nothing is copying to it." % (
+                n, d.get("Name") or "", (d.get("Size") or 0) / 1e9, ", ".join(l + ":" for l in letters) or "none")):
+            return
+        dev_msg.config(text="Ejecting disk %d..." % n)
+
+        def work():
+            try:
+                eject_disk(n, letters, lambda m: eq.put(("msg", m)))
+                eq.put(("ok", "Disk %d ejected - safe to unplug." % n))
+            except Exception as e:
+                eq.put(("err", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    tmenu = tk.Menu(root, tearoff=0)
+    tmenu.add_command(label="Eject", command=lambda: eject_selected())
+    tmenu.add_command(label="Manage partitions...", command=lambda: (nb.select(ptab), follow_disk(tree_disk(), True)))
+
+    def tree_menu(e):
+        row = tree.identify_row(e.y)
+        if row:
+            tree.selection_set(row)
+            tmenu.tk_popup(e.x_root, e.y_root)
+
+    tree.bind("<Button-3>", tree_menu)
+
+    def follow_disk(n, force=False):
+        if n is None or pstate["busy"] or (n == pstate["disk"] and not force):
+            return
+        for v in pdisk["values"]:
+            if v.startswith("Disk %s " % n):
+                pdisk.set(v)
+                load_disk()
+                return
     refresh = lambda: dev_wake.set()          # Refresh buttons on the tabs use the same worker
     threading.Thread(target=device_worker, daemon=True).start()
     device_poll()
@@ -2089,18 +2955,42 @@ def main():
     ap.add_argument("--hash", metavar="FILE", help="print MD5 / SHA-1 / SHA-256 of a file")
     ap.add_argument("--yes", action="store_true", help="skip the confirmation for --write-image")
     ap.add_argument("--no-verify", action="store_true", help="skip verification after --write-image")
+    ap.add_argument("--eject", metavar="DRIVE", help="safely eject the removable disk behind this drive letter")
+    ap.add_argument("--format", metavar="DRIVE", help="format the partition at DRIVE (ERASES IT); use with --fs/--label")
+    ap.add_argument("--fs", choices=["FAT32", "exFAT", "NTFS"], default="exFAT", help="file system for --format")
+    ap.add_argument("--label", default="", help="volume label for --format")
+    ap.add_argument("--cluster", type=int, default=0, help="cluster size in bytes for --format (0 = default)")
+    ap.add_argument("--full", action="store_true", help="full (not quick) format with --format")
     ap.add_argument("--version", action="version", version=APP_TITLE)
     ap.add_argument("--no-admin", action="store_true", help="do not ask for administrator rights")
     a = ap.parse_args()
-    needs_admin = (not a.cli or a.image or a.recover or a.write_image or a.verify) and not a.hash
+    needs_admin = (not a.cli or a.image or a.recover or a.write_image or a.verify or a.eject or a.format) and not a.hash
     if IS_WIN and needs_admin and not a.no_admin and not is_admin():
         if relaunch_as_admin():
             return                               # elevated copy is running
-    if not (a.cli or a.image or a.recover or a.write_image or a.verify or a.hash):
+    if not (a.cli or a.image or a.recover or a.write_image or a.verify or a.hash or a.eject or a.format):
         hide_own_console()
     if a.hash:
         for k, v in hash_file(a.hash).items():
             print(f"{k:7s}: {v}")
+    elif a.eject:
+        d = resolve_disk(a.eject)
+        if not d["safe"]:
+            sys.exit(f"Refusing: disk {d['number']} is not a removable/USB/SD disk.")
+        eject_disk(d["number"], d["letters"])
+    elif a.format:
+        d = resolve_disk(a.format)
+        if not d["safe"]:
+            sys.exit(f"Refusing: disk {d['number']} is not a removable/USB/SD disk (bus {d['bus']}, system {d['system']}).")
+        L = a.format.strip().rstrip("\\/:").upper()
+        part = next((p for p in list_partitions(d["number"])["Partitions"] if (p.get("Letter") or "").upper() == L), None)
+        if not part:
+            sys.exit("Could not find that partition.")
+        print(f"About to ERASE {L}: ({fmt_size(part['Size'])}) and format it as {a.fs}.")
+        if not a.yes and input("Type YES to continue: ").strip() != "YES":
+            sys.exit("Cancelled.")
+        op_format(d["number"], part, a.fs, a.label, a.cluster or None, not a.full)
+        print("Formatted.")
     elif a.write_image:
         img, drv = a.write_image
         d = resolve_disk(drv)

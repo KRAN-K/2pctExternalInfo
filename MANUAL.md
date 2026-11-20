@@ -1,24 +1,24 @@
-# 2%SDinfo v1.4: Installation and User Manual
+# 2%SDinfo v1.5: Installation and User Manual
 
-For `2pctSDinfo_v1.4.py` on Windows 10/11. Tests micro SD cards and USB drives for real capacity, integrity, speed and stability, and recovers accidentally deleted files.
+For `2pctSDinfo_v1.5.py` on Windows 10/11. Tests micro SD cards and USB drives for real capacity, integrity, speed and stability, and recovers accidentally deleted files.
 
 ## 1. What you need
 
 - Windows 10 or 11
 - A micro SD card and a reader, or a USB drive
 - Python 3.9 or newer
-- `2pctSDinfo_v1.4.py`
+- `2pctSDinfo_v1.5.py`
 - A backup of the card before running the Full test
 
 ## 2. Installation
 
 1. **Check Python:** press Win+R, type `cmd`, run `python --version`. If it shows 3.9 or higher, skip to step 3.
 2. **Install Python:** download from python.org/downloads. On the first screen tick **Add python.exe to PATH**, click Install Now, then confirm with `python --version` in a new Command Prompt. Tkinter is included.
-3. **Place the file:** create `D:\Claude` and copy `2pctSDinfo_v1.4.py` into it.
-4. **Start it by double-clicking `2pctSDinfo_v1.4.py`.** The console window hides itself, and Windows asks for administrator rights (needed for recovery and the imager). Click **Yes**. If you click No, the Test tab still works but recovery and imaging will say access denied.
+3. **Place the file:** create `D:\Claude` and copy `2pctSDinfo_v1.5.py` into it.
+4. **Start it by double-clicking `2pctSDinfo_v1.5.py`.** The console window hides itself, and Windows asks for administrator rights (needed for recovery and the imager). Click **Yes**. If you click No, the Test tab still works but recovery and imaging will say access denied.
    - If double-clicking opens the file in an editor, right-click it, choose Open with, then Python (tick Always use this app).
-   - Manual start from a terminal: `python 2pctSDinfo_v1.4.py` (add `--no-admin` to skip the administrator prompt).
-5. Optional: right-click `2pctSDinfo_v1.4.py`, Send to, Desktop (create shortcut).
+   - Manual start from a terminal: `python 2pctSDinfo_v1.5.py` (add `--no-admin` to skip the administrator prompt).
+5. Optional: right-click `2pctSDinfo_v1.5.py`, Send to, Desktop (create shortcut).
 
 ## 3. Preparing the card
 
@@ -52,7 +52,7 @@ USB flash drives work the same way. Ignore the SD speed class line for USB drive
 
 The **About** tab shows the program name and version, Python and Windows details, whether it is running as administrator, where the script and settings file are, and the full version history. **Copy diagnostics** puts those details on the clipboard so you can paste them when asking for help. **Open project page** opens the GitHub page.
 
-Versions are written v1.0, v1.1, v1.2, v1.3, v1.4 and so on. The version appears in the window title, in saved reports, in the script's file name (`2pctSDinfo_v1.4.py`) and with `--version`.
+Versions are written v1.0, v1.1, v1.2, v1.3, v1.4 and so on. The version appears in the window title, in saved reports, in the script's file name (`2pctSDinfo_v1.5.py`) and with `--version`.
 
 ## 5. Safety notes
 
@@ -89,7 +89,7 @@ The **Recover deleted files** tab scans the card read-only and rebuilds deleted 
 1. **Stop using the card immediately.** New writes can permanently overwrite deleted files.
 2. **Do not format** the card and **do not run the test**.
 3. Put the card in a PC reader.
-4. Start the program (double-click `2pctSDinfo_v1.4.py`) and click **Yes** on the administrator prompt. Raw card reads need admin rights.
+4. Start the program (double-click `2pctSDinfo_v1.5.py`) and click **Yes** on the administrator prompt. Raw card reads need admin rights.
 
 ### Steps
 
@@ -150,22 +150,58 @@ Read a whole card to an image file, write an image back to a card (for example a
 Command line:
 
 ```
-python 2pctSDinfo_v1.4.py --image E:\ D:\Claude\card.img --whole-disk
-python 2pctSDinfo_v1.4.py --write-image D:\Claude\pi.img E:\
-python 2pctSDinfo_v1.4.py --verify D:\Claude\pi.img E:\
-python 2pctSDinfo_v1.4.py --hash D:\Claude\pi.img
+python 2pctSDinfo_v1.5.py --image E:\ D:\Claude\card.img --whole-disk
+python 2pctSDinfo_v1.5.py --write-image D:\Claude\pi.img E:\
+python 2pctSDinfo_v1.5.py --verify D:\Claude\pi.img E:\
+python 2pctSDinfo_v1.5.py --hash D:\Claude\pi.img
 ```
 
 Add `--yes` to skip the typed confirmation and `--no-verify` to skip verification after a write.
 
-## 9. Command line
+## 9. Partitions tab (AOMEI-style) and Eject
+
+### Eject
+- In the devices panel, click a disk or volume and press **Eject**, or right-click it and choose **Eject**. The program asks the device to disconnect, waits until its drive letters disappear, and tells you when it is safe to unplug. If Windows will not release it, the disk is taken offline instead. If something is still using the drive you get a message: close Explorer windows and backup programs, then try again.
+- Only removable, USB and SD disks can be ejected. Your system and internal disks are refused.
+- The same thing is on the Partitions tab as **Eject Disk**, and on the command line as `--eject E:`.
+
+### The Partitions tab
+1. Pick the **Disk** at the top (it follows whatever you click in the devices panel). The header shows size, MBR/GPT, online state and **SAFE TO MODIFY** or **PROTECTED**.
+2. The **disk map** shows every partition as a colored block sized to scale, with **Unallocated** space in between. Click a block, or a row in the list below it, to select it.
+3. Use the buttons on the left:
+
+| Button | What it does |
+|---|---|
+| Format Partition | Erase and format as FAT32, exFAT or NTFS, with a label, a cluster size and quick or full format |
+| Delete Partition | Remove the partition and its data |
+| Create Partition | In selected unallocated space: choose size, file system, label and cluster size |
+| Resize Partition | Shrink or grow an NTFS partition within the range Windows allows |
+| Change Label | Rename the volume |
+| Change Drive Letter | Pick a free letter |
+| Initialize Disk | Give an empty, uninitialized disk an MBR or GPT partition table |
+| Clean Disk | Remove all partitions and the partition table (quick) |
+| Wipe Disk | Overwrite the whole disk with zeros (slow, cannot be undone) |
+| Eject Disk | Safely remove the device |
+
+4. Destructive actions ask you to type the drive letter, partition number or disk number to confirm. Progress and results appear in the log under the list.
+
+### FAT32 on cards larger than 32 GB
+Windows refuses to format a volume above 32 GB as FAT32. When you choose FAT32 for a bigger partition, the program uses its own formatter (32 KB clusters by default for cards above 32 GB, which is what Windows would use). Quick format only. Some devices that need FAT32 (older cameras, dash cams, some consoles) are happy with this; others only accept up to 32 GB, so check the device manual. The formatter was checked against the Linux `fsck.fat` tool for sizes from 100 MB to 70 GiB.
+
+### Limits
+- Protected disks (system and internal) are shown but every operation is disabled.
+- Windows can only resize NTFS partitions. For FAT32 or exFAT, back up, delete and create again.
+- Operations run one at a time and take effect immediately. There is no pending-changes queue or undo as in AOMEI, so read each confirmation.
+- Merging, splitting, moving and converting partitions without data loss are not included.
+
+## 10. Command line
 
 ```
-python 2pctSDinfo_v1.4.py --cli E:\ --mode quick --size 512 --report D:\Claude\report.txt
-python 2pctSDinfo_v1.4.py --cli E:\ --mode full
-python 2pctSDinfo_v1.4.py --image E:\ D:\Claude\card.img
-python 2pctSDinfo_v1.4.py --recover D:\Claude\card.img --out D:\Claude\Recovered
-python 2pctSDinfo_v1.4.py --recover E:\ --out D:\Claude\Recovered --types Photos,Documents
+python 2pctSDinfo_v1.5.py --cli E:\ --mode quick --size 512 --report D:\Claude\report.txt
+python 2pctSDinfo_v1.5.py --cli E:\ --mode full
+python 2pctSDinfo_v1.5.py --image E:\ D:\Claude\card.img
+python 2pctSDinfo_v1.5.py --recover D:\Claude\card.img --out D:\Claude\Recovered
+python 2pctSDinfo_v1.5.py --recover E:\ --out D:\Claude\Recovered --types Photos,Documents
 ```
 
 | Option | Meaning |
@@ -179,8 +215,10 @@ python 2pctSDinfo_v1.4.py --recover E:\ --out D:\Claude\Recovered --types Photos
 | `--out FOLDER` | Recovery output folder (different drive) |
 | `--types` | Photos, Documents, Video, Audio_Video, Other |
 | `--keep-existing` | Also recover files that still exist |
+| `--eject DRIVE` | Safely eject the removable disk behind this letter |
+| `--format DRIVE` | Format that partition (erases it); use with `--fs FAT32\|exFAT\|NTFS`, `--label`, `--cluster`, `--full`, `--yes` |
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Problem | Fix |
 |---|---|
@@ -195,17 +233,17 @@ python 2pctSDinfo_v1.4.py --recover E:\ --out D:\Claude\Recovered --types Photos
 | Very slow speeds | Try another USB port or reader, avoid hubs and USB 2.0 readers |
 | Leftover `SDCHK_*.bin` | Delete them manually |
 
-## 11. Limits
+## 12. Limits
 
 - SD cards have no S.M.A.R.T. data. USB readers usually hide the CID/CSD registers.
 - Quick mode cannot prove full advertised capacity. Only Full can.
 - Speed depends on the reader and port as well as the card.
 - A pass is strong evidence for today, not a guarantee. Keep backups.
 
-## 12. Quick-start checklist
+## 13. Quick-start checklist
 
 1. Install Python with Add to PATH.
-2. Copy `2pctSDinfo_v1.4.py` to `D:\Claude`.
+2. Copy `2pctSDinfo_v1.5.py` to `D:\Claude`.
 3. Insert the card and run the program.
 4. Click Card info only, then run Quick, then Full on new or suspicious cards.
 5. Read the score and verdict and save the report.
