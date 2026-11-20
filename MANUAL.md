@@ -15,11 +15,10 @@ For `SDCardChecker.py` on Windows 10/11. Tests micro SD cards and USB drives for
 1. **Check Python:** press Win+R, type `cmd`, run `python --version`. If it shows 3.9 or higher, skip to step 3.
 2. **Install Python:** download from python.org/downloads. On the first screen tick **Add python.exe to PATH**, click Install Now, then confirm with `python --version` in a new Command Prompt. Tkinter is included.
 3. **Place the file:** create `D:\Claude` and copy `SDCardChecker.py` into it.
-4. **Start it by double-clicking `SDCardChecker.bat`** (keep it in the same folder as `SDCardChecker.py`). It opens the app with no console window and Windows asks for administrator rights, which the recovery tab needs. Click Yes. If you click No, the Test tab still works but recovery will say access denied.
-   - If Python is missing, the launcher installs it with winget. When it finishes, double-click the file again.
-   - Double-clicking `SDCardChecker.py` directly also works if Python is installed.
-   - Manual start: `python SDCardChecker.py` (add `--no-admin` to skip the administrator prompt).
-5. Optional: right-click `SDCardChecker.bat`, Send to, Desktop (create shortcut).
+4. **Start it by double-clicking `SDCardChecker.py`.** The console window hides itself, and Windows asks for administrator rights (needed for recovery and the imager). Click **Yes**. If you click No, the Test tab still works but recovery and imaging will say access denied.
+   - If double-clicking opens the file in an editor, right-click it, choose Open with, then Python (tick Always use this app).
+   - Manual start from a terminal: `python SDCardChecker.py` (add `--no-admin` to skip the administrator prompt).
+5. Optional: right-click `SDCardChecker.py`, Send to, Desktop (create shortcut).
 
 ## 3. Preparing the card
 
@@ -27,6 +26,11 @@ For `SDCardChecker.py` on Windows 10/11. Tests micro SD cards and USB drives for
 2. Close programs that use it.
 3. Make sure the lock switch is not locked.
 4. Use a reader plugged directly into the PC, not through a hub.
+
+## 3a. The window: devices panel and dark mode
+
+- **Available devices (right side):** lists every disk and volume in the PC with bus type, free space and size, and updates by itself every few seconds when you insert or remove a card. **Green** is a removable or USB disk (safe to write), **red** is your system disk. Click a device and it becomes the selected device in all tabs. **Refresh now** forces an update.
+- **Dark mode:** tick the box at the top right of the devices panel. The choice is remembered in `.sdcardchecker.json` in your user folder.
 
 ## 4. Test and Info tab
 
@@ -79,7 +83,7 @@ The **Recover deleted files** tab scans the card read-only and rebuilds deleted 
 1. **Stop using the card immediately.** New writes can permanently overwrite deleted files.
 2. **Do not format** the card and **do not run the test**.
 3. Put the card in a PC reader.
-4. Start the program with `SDCardChecker.bat` and click **Yes** on the administrator prompt. Raw card reads need admin rights.
+4. Start the program (double-click `SDCardChecker.py`) and click **Yes** on the administrator prompt. Raw card reads need admin rights.
 
 ### Steps
 
@@ -178,7 +182,7 @@ python SDCardChecker.py --recover E:\ --out D:\Claude\Recovered --types Photos,D
 | `No module named tkinter` | Re-run the Python installer, Modify, enable tcl/tk and IDLE |
 | Card not listed | Click Refresh, check Disk Management for a drive letter, or use Browse folder |
 | Device details show n/a | Some readers hide them. Try a different reader or run as administrator |
-| Access denied in recovery or imager | Start with `SDCardChecker.bat` and click Yes on the administrator prompt |
+| Access denied in recovery or imager | Start the program again and click Yes on the administrator prompt |
 | Cannot lock the card when writing | Close Explorer windows, backup tools and anything using the card, then retry |
 | Write error at the start | Check the lock switch, free space and read-only state |
 | Write error partway | The card is failing or was removed |

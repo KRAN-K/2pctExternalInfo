@@ -1174,6 +1174,79 @@ def verify_image(img, target, log=print, progress=None, stop=None):
     return False
 
 
+PS_DEVICES = r"""
+$ErrorActionPreference='SilentlyContinue'
+$res=@()
+foreach($d in (Get-Disk)){
+  $vols=@()
+  foreach($p in (Get-Partition -DiskNumber $d.Number | Where-Object { $_.DriveLetter })){
+    $v=Get-Volume -DriveLetter $p.DriveLetter
+    $vols+=[pscustomobject]@{Letter="$($p.DriveLetter)";Label=$v.FileSystemLabel;FS=$v.FileSystem;Size=$v.Size;Free=$v.SizeRemaining}
+  }
+  $res+=[pscustomobject]@{Number=$d.Number;Name=$d.FriendlyName;Bus="$($d.BusType)";Size=$d.Size;Style="$($d.PartitionStyle)";Health="$($d.HealthStatus)";System=[bool]($d.IsSystem -or $d.IsBoot);Volumes=$vols}
+}
+ConvertTo-Json -InputObject $res -Depth 4 -Compress
+"""
+
+
+def list_devices():
+    """All physical disks with their volumes (Windows). Test hook: SDCC_FAKE_DEVICES=<json>."""
+    fake = os.environ.get("SDCC_FAKE_DEVICES")
+    if fake:
+        return json.loads(fake)
+    if not IS_WIN:
+        return []
+    raw = subprocess.run(["powershell", "-NoProfile", "-Command", PS_DEVICES], capture_output=True,
+                         text=True, timeout=90, creationflags=hidden_flags()).stdout
+    data = json.loads(raw) if raw.strip() else []
+    if isinstance(data, dict):
+        data = [data]
+    for d in data:
+        v = d.get("Volumes") or []
+        d["Volumes"] = [v] if isinstance(v, dict) else v
+    return data
+
+
+def hide_own_console():
+    """Double-clicking a .py opens a console window; hide it if it belongs only to us."""
+    if not IS_WIN:
+        return
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        hwnd = k.GetConsoleWindow()
+        if hwnd and k.GetConsoleProcessList((ctypes.c_uint * 4)(), 4) <= 1:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)
+    except Exception:
+        pass
+
+
+SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".sdcardchecker.json")
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_settings(d):
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+    except OSError:
+        pass
+
+
+THEMES = {
+    "light": None,
+    "dark": {"bg": "#1e1f22", "fg": "#e6e6e6", "field": "#2b2d30", "btn": "#3a3d41", "btn_hi": "#4a4e54",
+             "accent": "#3b82c4", "warn": "#ff7b72", "ok": "#5fd47f", "dim": "#9aa0a6", "border": "#43464b"},
+}
+
+
 # ----------------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------------
@@ -1202,8 +1275,15 @@ def run_gui():
 
     root = tk.Tk()
     root.title("SD Card Checker")
-    root.geometry("880x760")
-    nb = ttk.Notebook(root)
+    root.geometry("1300x780")
+    root.minsize(980, 600)
+    main = ttk.PanedWindow(root, orient="horizontal")
+    main.pack(fill="both", expand=True)
+    left = ttk.Frame(main)
+    right = ttk.Frame(main, width=380)
+    main.add(left, weight=3)
+    main.add(right, weight=1)
+    nb = ttk.Notebook(left)
     nb.pack(fill="both", expand=True)
     tab = ttk.Frame(nb)
     rtab = ttk.Frame(nb)
@@ -1225,14 +1305,7 @@ def run_gui():
         combo.current(0)
     combo.grid(row=0, column=1, padx=6)
 
-    def refresh():
-        nonlocal drives
-        drives = list_drives()
-        combo["values"] = [d[1] for d in drives]
-        if drives:
-            combo.current(0)
-
-    ttk.Button(top, text="Refresh", command=refresh).grid(row=0, column=2)
+    ttk.Button(top, text="Refresh", command=lambda: refresh()).grid(row=0, column=2)
     ttk.Button(top, text="Browse folder...", command=lambda: browse()).grid(row=0, column=3, padx=4)
     custom = {"path": None}
 
@@ -1249,7 +1322,7 @@ def run_gui():
     ttk.Radiobutton(opt, text="Full (all free space - detects fake capacity, can take hours)",
                     variable=mode, value="full").pack(side="left", padx=12)
 
-    btns = ttk.Frame(root, padding=8)
+    btns = ttk.Frame(tab, padding=8)
     btns.pack(fill="x")
     pb = ttk.Progressbar(tab, maximum=100)
     pb.pack(fill="x", padx=8)
@@ -1370,7 +1443,7 @@ def run_gui():
 
 
     # ---------------- Recovery tab ----------------
-    warn = tk.Label(rtab, justify="left", fg="#b00020", wraplength=820, anchor="w",
+    warn = tk.Label(rtab, justify="left", fg="#b00020", wraplength=760, anchor="w",
                     text="STOP USING THE CARD NOW. Every new file written to it can permanently overwrite "
                          "the deleted ones. Do NOT format it and do NOT run the Test tab. Recovery only reads "
                          "the card; save results on a DIFFERENT drive. Needs 'Run as administrator'.")
@@ -1404,8 +1477,8 @@ def run_gui():
     gf.pack(fill="x")
     labels_g = {"Photos": "Photos (JPG, PNG, GIF, BMP)", "Documents": "Documents (PDF, DOCX/XLSX/PPTX, ZIP)",
                 "Video": "Video (MP4, MOV, HEIC, 3GP)", "Audio_Video": "WAV / AVI", "Other": "7z, SQLite"}
-    for g in GROUPS:
-        ttk.Checkbutton(gf, text=labels_g[g], variable=gv[g]).pack(side="left", padx=4)
+    for i_, g in enumerate(GROUPS):
+        ttk.Checkbutton(gf, text=labels_g[g], variable=gv[g]).grid(row=i_ // 2, column=i_ % 2, sticky="w", padx=4, pady=1)
     skipvar = tk.BooleanVar(value=True)
     ttk.Checkbutton(rtab, text="Skip files that still exist on the card (recover only what was deleted)",
                     variable=skipvar).pack(anchor="w", padx=12, pady=4)
@@ -1499,10 +1572,10 @@ def run_gui():
 
 
     # ---------------- Disk Imager tab ----------------
-    tk.Label(itab, justify="left", fg="#b00020", wraplength=820, anchor="w",
-             text="WRITE ERASES THE WHOLE CARD. Only removable / USB / SD disks are allowed; your system "
-                  "drive is blocked. Needs 'Yes' on the administrator prompt. Close Explorer windows on the card first."
-             ).pack(fill="x", padx=8, pady=6)
+    iwarn = tk.Label(itab, justify="left", fg="#b00020", wraplength=760, anchor="w",
+                     text="WRITE ERASES THE WHOLE CARD. Only removable / USB / SD disks are allowed; your system "
+                          "drive is blocked. Needs 'Yes' on the administrator prompt. Close Explorer windows on the card first.")
+    iwarn.pack(fill="x", padx=8, pady=6)
     imf = ttk.Frame(itab, padding=8)
     imf.pack(fill="x")
     ttk.Label(imf, text="Image file:").grid(row=0, column=0, sticky="w")
@@ -1529,13 +1602,7 @@ def run_gui():
         icombo.current(0)
     icombo.grid(row=1, column=1, padx=6, pady=2)
 
-    def irefresh():
-        refresh()
-        icombo["values"] = [d[1] for d in drives]
-        if drives:
-            icombo.current(0)
-
-    ttk.Button(imf, text="Refresh", command=irefresh).grid(row=1, column=2)
+    ttk.Button(imf, text="Refresh", command=lambda: refresh()).grid(row=1, column=2)
     whole_var = tk.BooleanVar(value=True)
     verify_var = tk.BooleanVar(value=True)
     of = ttk.Frame(itab, padding=(8, 0))
@@ -1663,10 +1730,189 @@ def run_gui():
     istop_btn.pack(side="left")
     ipoll()
 
+    # ---------------- Devices panel (right) + dark mode ----------------
+    settings = load_settings()
+    dark_var = tk.BooleanVar(value=bool(settings.get("dark")))
+    style = ttk.Style()
+    orig_theme = style.theme_use()
+    text_widgets = [txt, rtxt, itxt]
+    warn_labels = [warn, iwarn]
+    pal_light = {"bg": style.lookup("TFrame", "background") or "#f0f0f0", "fg": "#000000", "field": "#ffffff",
+                 "warn": "#b00020", "ok": "#1b7f3b", "dim": "#666666", "accent": "#3b82c4", "border": "#a0a0a0"}
+
+    def apply_theme():
+        p = THEMES["dark"] if dark_var.get() else None
+        if p:
+            style.theme_use("clam")
+            style.configure(".", background=p["bg"], foreground=p["fg"], fieldbackground=p["field"],
+                            bordercolor=p["border"], lightcolor=p["bg"], darkcolor=p["bg"],
+                            troughcolor=p["field"], selectbackground=p["accent"], selectforeground="#ffffff",
+                            insertcolor=p["fg"])
+            style.configure("TButton", background=p["btn"], foreground=p["fg"], padding=4)
+            style.map("TButton", background=[("active", p["btn_hi"]), ("disabled", p["bg"])],
+                      foreground=[("disabled", p["dim"])])
+            style.configure("TNotebook", background=p["bg"], bordercolor=p["border"])
+            style.configure("TNotebook.Tab", background=p["btn"], foreground=p["fg"], padding=(10, 4))
+            style.map("TNotebook.Tab", background=[("selected", p["accent"]), ("active", p["btn_hi"])],
+                      foreground=[("selected", "#ffffff")])
+            style.map("TCheckbutton", background=[("active", p["bg"])], indicatorcolor=[("selected", p["accent"]), ("!selected", p["field"])])
+            style.map("TRadiobutton", background=[("active", p["bg"])], indicatorcolor=[("selected", p["accent"]), ("!selected", p["field"])])
+            style.configure("TCombobox", arrowcolor=p["fg"], background=p["btn"])
+            style.map("TCombobox", fieldbackground=[("readonly", p["field"])], foreground=[("readonly", p["fg"])],
+                      selectbackground=[("readonly", p["field"])], selectforeground=[("readonly", p["fg"])])
+            style.configure("TEntry", fieldbackground=p["field"], foreground=p["fg"])
+            style.configure("Horizontal.TProgressbar", background=p["accent"], troughcolor=p["field"])
+            style.configure("Treeview", background=p["field"], fieldbackground=p["field"], foreground=p["fg"], rowheight=22)
+            style.configure("Treeview.Heading", background=p["btn"], foreground=p["fg"])
+            style.map("Treeview", background=[("selected", p["accent"])], foreground=[("selected", "#ffffff")])
+            style.configure("TPanedwindow", background=p["bg"])
+            pal = p
+        else:
+            style.theme_use(orig_theme)
+            style.configure("Treeview", rowheight=22)
+            pal = pal_light
+        root.configure(bg=pal["bg"])
+        for t in text_widgets:
+            t.configure(bg=pal["field"], fg=pal["fg"], insertbackground=pal["fg"],
+                        selectbackground=pal["accent"], selectforeground="#ffffff",
+                        highlightthickness=1, highlightbackground=pal["border"], highlightcolor=pal["accent"])
+        for lb in warn_labels:
+            lb.configure(bg=pal["bg"], fg=pal["warn"])
+        dev_hint.configure(bg=pal["bg"], fg=pal["dim"])
+        tree.tag_configure("usb", foreground=pal["ok"])
+        tree.tag_configure("sys", foreground=pal["warn"])
+        tree.tag_configure("fix", foreground=pal["fg"])
+        for c in (combo, rcombo, icombo):                       # drop-down list colours
+            try:
+                c.tk.eval("set pd [ttk::combobox::PopdownWindow %s]; $pd.f.l configure -background %s "
+                          "-foreground %s -selectbackground %s" % (c, pal["field"], pal["fg"], pal["accent"]))
+            except tk.TclError:
+                pass
+        settings["dark"] = dark_var.get()
+        save_settings(settings)
+
+    # --- devices tree
+    hdr = ttk.Frame(right, padding=(8, 8, 8, 0))
+    hdr.pack(fill="x")
+    ttk.Label(hdr, text="Available devices", font=("Segoe UI", 11, "bold")).pack(side="left")
+    ttk.Checkbutton(hdr, text="Dark mode", variable=dark_var, command=lambda: apply_theme()).pack(side="right")
+    tree = ttk.Treeview(right, columns=("info", "size"), height=16, selectmode="browse")
+    tree.heading("#0", text="Device")
+    tree.heading("info", text="Bus / FS")
+    tree.heading("size", text="Free / Size")
+    tree.column("#0", width=185, stretch=True)
+    tree.column("info", width=60, stretch=False)
+    tree.column("size", width=125, stretch=False)
+    tree.pack(fill="both", expand=True, padx=8, pady=6)
+    dev_hint = tk.Label(right, justify="left", wraplength=320, anchor="w",
+                        text="Click a device to select it in every tab.\nGreen = removable (safe to write), "
+                             "red = system disk.")
+    dev_hint.pack(fill="x", padx=8)
+    dev_btns = ttk.Frame(right, padding=8)
+    dev_btns.pack(fill="x")
+    dq = queue.Queue()
+    dev_stop = threading.Event()
+    dev_wake = threading.Event()
+    dev_state = {"sig": None}
+
+    def fill_tree(devs):
+        tree.delete(*tree.get_children())
+        if not devs:
+            tree.insert("", "end", text="(no devices found - Windows only)" if not IS_WIN else "(no devices found)")
+            return
+        for d in devs:
+            usb = str(d.get("Bus", "")).upper() in SAFE_BUS and not d.get("System")
+            tag = "sys" if d.get("System") else ("usb" if usb else "fix")
+            top_id = tree.insert("", "end", iid="d%s" % d.get("Number"), open=True, tags=(tag,),
+                                 text="Disk %s  %s" % (d.get("Number"), d.get("Name") or ""),
+                                 values=(d.get("Bus", ""), "%.1f GB" % ((d.get("Size") or 0) / 1e9)))
+            for v in d.get("Volumes") or []:
+                tree.insert(top_id, "end", iid="v%s" % v.get("Letter"), tags=(tag,),
+                            text="%s:  %s" % (v.get("Letter"), v.get("Label") or "(no label)"),
+                            values=(v.get("FS") or "", "%.1f / %.1f GB" % ((v.get("Free") or 0) / 1e9, (v.get("Size") or 0) / 1e9)))
+
+    def apply_drives(new):
+        nonlocal drives
+        old = {d[1]: d[0] for d in drives}
+        sel = {c: old.get(c.get()) for c in (combo, rcombo, icombo)}
+        drives = new
+        vals = [d[1] for d in drives]
+        for c in (combo, rcombo, icombo):
+            c["values"] = vals
+            path = sel[c]
+            idx = next((i for i, d in enumerate(drives) if d[0] == path), None)
+            if idx is not None:
+                c.current(idx)
+            elif c.get() in old or not c.get():
+                if drives:
+                    c.current(0)
+
+    def device_poll():
+        try:
+            while True:
+                devs, drv = dq.get_nowait()
+                sig = json.dumps([devs, [d[:2] for d in drv]], sort_keys=True, default=str)
+                if sig != dev_state["sig"]:
+                    dev_state["sig"] = sig
+                    sel_item = tree.selection()
+                    fill_tree(devs)
+                    apply_drives(drv)
+                    if sel_item and tree.exists(sel_item[0]):
+                        tree.selection_set(sel_item[0])
+        except queue.Empty:
+            pass
+        root.after(400, device_poll)
+
+    def device_worker():
+        while not dev_stop.is_set():
+            try:
+                dq.put((list_devices(), list_drives()))
+            except Exception:
+                pass
+            dev_wake.wait(8)
+            dev_wake.clear()
+
+    def pick_letter(letter):
+        for i, d in enumerate(drives):
+            if d[0][:1].upper() == letter.upper():
+                for c in (combo, rcombo, icombo):
+                    c.current(i)
+                custom["path"] = None
+                return
+
+    def on_tree_select(_e=None):
+        s = tree.selection()
+        if not s:
+            return
+        iid = s[0]
+        if iid.startswith("v"):
+            pick_letter(iid[1:])
+        else:
+            kids = tree.get_children(iid)
+            if kids:
+                pick_letter(kids[0][1:])
+
+    tree.bind("<<TreeviewSelect>>", on_tree_select)
+    ttk.Button(dev_btns, text="Refresh now", command=dev_wake.set).pack(side="left")
+    refresh = lambda: dev_wake.set()          # Refresh buttons on the tabs use the same worker
+    threading.Thread(target=device_worker, daemon=True).start()
+    device_poll()
+    apply_theme()
+
+    def place_sash():
+        try:
+            main.sashpos(0, max(560, root.winfo_width() - 400))
+        except tk.TclError:
+            pass
+
+    root.after(150, place_sash)
+
     def on_close():
         stop_evt.set()
         rstop.set()
         istop.set()
+        dev_stop.set()
+        dev_wake.set()
         root.after(300, root.destroy)
 
     root.protocol("WM_DELETE_WINDOW", on_close)
@@ -1722,6 +1968,8 @@ def main():
     if IS_WIN and needs_admin and not a.no_admin and not is_admin():
         if relaunch_as_admin():
             return                               # elevated copy is running
+    if not (a.cli or a.image or a.recover or a.write_image or a.verify or a.hash):
+        hide_own_console()
     if a.hash:
         for k, v in hash_file(a.hash).items():
             print(f"{k:7s}: {v}")
