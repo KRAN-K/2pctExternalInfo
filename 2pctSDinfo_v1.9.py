@@ -1,10 +1,10 @@
 # NEED PYTHON? Download the Windows installer here (copy and paste into your browser): https://www.python.org/downloads/windows/
 # On the first installer screen tick "Add python.exe to PATH", click Install Now, then double-click this file (2pctSDinfo).
 r"""
-2%SDinfo  v1.8  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
+2%SDinfo  v1.9  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
 
-GUI:   python 2pctSDinfo_v1.8.py
-CLI:   python 2pctSDinfo_v1.8.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
+GUI:   python 2pctSDinfo_v1.9.py
+CLI:   python 2pctSDinfo_v1.9.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
 
 What it does
   1. CARD INFO      label, filesystem, size, free space, serial, reader/bus type, model,
@@ -42,12 +42,17 @@ IS_WIN = sys.platform.startswith("win")
 # App identity and version history  (add a new entry at the TOP of CHANGELOG for each release)
 # ----------------------------------------------------------------------------
 APP_NAME = "2%SDinfo"
-APP_VERSION = "1.8"
+APP_VERSION = "1.9"
 APP_TAG = "v" + APP_VERSION
 APP_TITLE = f"{APP_NAME} {APP_TAG}"
 APP_TAGLINE = "SD card & USB drive checker, disk imager and deleted-file recovery"
 APP_REPO = "https://github.com/KRAN-K/2pctExternalInfo"
 CHANGELOG = [
+    ("1.9", "2026-11-19", [
+        "Pi tab: new 'Android-based systems' folder - every Android / LineageOS / AOSP / Bass OS image found in Raspberry Pi's own list, plus KonstaKANG (LineageOS, AOSP, Android TV) and emteria.OS",
+        "Android images that are only offered on a project web page get an 'Open download page' button; save the .zip, then pick it with 'Use own image file'",
+        "Fix: first-boot setup is no longer applied to images that do not support it (Android and other non-Raspberry-Pi-OS images)",
+    ]),
     ("1.8", "2026-11-19", [
         "New 2%SDinfo icon: window icon, taskbar icon and About tab (icon files also in the assets folder)",
         "Pi tab: 'Update list now' button re-downloads Raspberry Pi's latest OS list on demand and shows when it was updated",
@@ -1677,6 +1682,11 @@ def pi_load_repo(url=None, log=print, custom=None):
                 data, src = json.load(f), "saved copy (offline)"
         else:
             raise RuntimeError(f"Could not load the Raspberry Pi OS list: {last}")
+    try:
+        nf, npg = pi_add_android(data)
+        log("Android folder: %d images from the official list, %d project pages." % (nf, npg))
+    except Exception as e:
+        log("Could not build the Android folder: %s" % e)
     if custom and custom.strip():
         try:
             cd = pi_read_json(custom)
@@ -1689,6 +1699,52 @@ def pi_load_repo(url=None, log=print, custom=None):
         except Exception as e:
             log("Could not read your own list (%s): %s" % (custom.strip(), e))
     return data, src
+
+
+PI_ANDROID_RE = re.compile(r"android|lineage|aosp|emteria|bass ?os|bliss", re.I)
+
+# Android builds that are only offered on a web page (file-host links change with every build, so no direct link).
+PI_ANDROID_PAGES = [
+    ("AOSP Android 17 - Raspberry Pi 5 / 500 / CM5 (KonstaKANG)", "Plain Android (AOSP). Newest build is listed on the page; 2 GB RAM or more.",
+     "https://konstakang.com/devices/rpi5/AOSP17", ["pi5-64bit"]),
+    ("AOSP Android 16 - Raspberry Pi 5 / 500 / CM5 (KonstaKANG)", "Plain Android (AOSP).",
+     "https://konstakang.com/devices/rpi5/AOSP16", ["pi5-64bit"]),
+    ("LineageOS 22.2 (Android 15) - Raspberry Pi 5 / 500 / CM5 (KonstaKANG)", "LineageOS build with Raspberry Pi settings; 2 GB RAM or more.",
+     "https://konstakang.com/devices/rpi5/LineageOS22/", ["pi5-64bit"]),
+    ("LineageOS 23.2 (Android 16) - Raspberry Pi 4 / 400 / CM4 (KonstaKANG)", "LineageOS build with Raspberry Pi settings.",
+     "https://konstakang.com/devices/rpi4/LineageOS23", ["pi4-64bit"]),
+    ("LineageOS 22.2 (Android 15) - Raspberry Pi 4 / 400 / CM4 (KonstaKANG)", "LineageOS build with Raspberry Pi settings.",
+     "https://konstakang.com/devices/rpi4/LineageOS22", ["pi4-64bit"]),
+    ("Android TV (LineageOS) - Raspberry Pi 4 and 5 (KonstaKANG)", "All Android TV builds, newest first; pick the one for your Pi.",
+     "https://konstakang.com/tag/AndroidTV", ["pi5-64bit", "pi4-64bit"]),
+    ("emteria.OS - Android for Raspberry Pi 4 / 5 (freemium)", "Commercial Android with a free trial; install guide with Raspberry Pi Imager.",
+     "https://emteria.com/kb/install-android-raspberry-pi-5-imager", ["pi5-64bit", "pi4-64bit"]),
+]
+
+
+def pi_find_android(items, seen=None):
+    """Every downloadable entry in the list whose name / description / link looks Android-based."""
+    seen = set() if seen is None else seen
+    out = []
+    for n in items:
+        if n.get("subitems"):
+            out += pi_find_android(n["subitems"], seen)
+        elif n.get("url") and n["url"] not in seen and n["url"] != "internal://format" \
+                and PI_ANDROID_RE.search(" ".join((n.get("name", ""), n.get("description", ""), n["url"]))):
+            seen.add(n["url"])
+            out.append(n)
+    return out
+
+
+def pi_add_android(data):
+    found = pi_find_android(data.get("os_list") or [])
+    pages = [{"name": n, "description": d, "page": u, "devices": t, "init_format": "none"}
+             for n, d, u, t in PI_ANDROID_PAGES]
+    data["os_list"] = list(data["os_list"]) + [{
+        "name": "Android-based systems (all)",
+        "description": "Android, LineageOS, AOSP and Bass OS images from Raspberry Pi's list, plus project pages for KonstaKANG and emteria",
+        "subitems": found + pages}]
+    return len(found), len(pages)
 
 
 def pi_device_choices(data):
@@ -2036,14 +2092,20 @@ PI_CMDLINE_ADD = " systemd.run=/boot/firstrun.sh systemd.run_success_action=rebo
 def pi_detect_format(boot_dir):
     if os.path.isfile(os.path.join(boot_dir, "user-data")):
         return "cloudinit-rpi"
-    if os.path.isfile(os.path.join(boot_dir, "cmdline.txt")):
-        return "systemd"
+    cp = os.path.join(boot_dir, "cmdline.txt")
+    if os.path.isfile(cp):
+        try:
+            with open(cp, encoding="utf-8", errors="ignore") as f:
+                if "raspberrypi-sys-mods" in f.read():          # Raspberry Pi OS style first-boot hook
+                    return "systemd"
+        except OSError:
+            pass
     return None
 
 
 def pi_write_boot_files(boot_dir, o, fmt=None, log=print):
     """Write the first-boot setup onto the card's boot partition (the FAT32 one)."""
-    fmt = fmt if fmt and fmt != "none" else pi_detect_format(boot_dir)
+    fmt = pi_detect_format(boot_dir) if fmt is None else fmt
     if fmt not in ("cloudinit", "cloudinit-rpi", "systemd"):
         log("This image has no first-boot setup support - skipped customisation.")
         return False
@@ -3186,14 +3248,19 @@ def run_gui():
 
     ttk.Button(pt1b, text="Browse...", command=pi_pick_repo).pack(side="left")
     ttk.Button(pt1b, text="Add list", command=lambda: pi_load()).pack(side="left", padx=4)
-    pitree = ttk.Treeview(pitab, columns=("rel", "size"), height=7, selectmode="browse")
+    pitf = ttk.Frame(pitab)
+    pitf.pack(fill="x", padx=8, pady=4)
+    pitree = ttk.Treeview(pitf, columns=("rel", "size"), height=7, selectmode="browse")
     pitree.heading("#0", text="Operating system")
     pitree.heading("rel", text="Released")
     pitree.heading("size", text="Download")
     pitree.column("#0", width=380, stretch=True)
     pitree.column("rel", width=90, stretch=False)
     pitree.column("size", width=90, stretch=False)
-    pitree.pack(fill="x", padx=8, pady=4)
+    pisb = ttk.Scrollbar(pitf, orient="vertical", command=pitree.yview)
+    pitree.configure(yscrollcommand=pisb.set)
+    pisb.pack(side="right", fill="y")
+    pitree.pack(side="left", fill="x", expand=True)
     pidesc = ttk.Label(pitab, text="Pick an operating system.", wraplength=820, justify="left")
     pidesc.pack(anchor="w", padx=8)
     pt2 = ttk.Frame(pitab, padding=(8, 4))
@@ -3204,6 +3271,8 @@ def run_gui():
         pdcombo.current(0)
     pdcombo.pack(side="left", padx=6)
     ttk.Button(pt2, text="Use own image file...", command=lambda: pi_pick_custom()).pack(side="left")
+    pbtn_page = ttk.Button(pt2, text="Open download page", state="disabled", command=lambda: pi_open_page())
+    pbtn_page.pack(side="left", padx=6)
     picust = ttk.Label(pt2, text="")
     picust.pack(side="left", padx=8)
 
@@ -3335,10 +3404,25 @@ def run_gui():
             tags = list(pistate["tags"])
             threading.Thread(target=lambda: piq.put(("kids", (iid, pi_children(n, tags, lambda m: piq.put(("log", m)))))), daemon=True).start()
 
-    def pi_pick(_e=None):
+    def pi_open_page():
         n = pi_selected_node()
+        if n and n.get("page"):
+            import webbrowser
+            webbrowser.open(n["page"])
+            pilog("Opened %s - save the .zip, then click 'Use own image file...' and choose it." % n["page"])
+
+    def pi_pick(_e=None):
+        if pitree.selection() and pistate["custom"]:
+            pistate["custom"] = None
+            picust.config(text="")
+        n = pi_selected_node()
+        pbtn_page.config(state="normal" if (n and n.get("page")) else "disabled")
         if n is None:
             pidesc.config(text="Pick an operating system (open a folder with the arrow).")
+            return
+        if n.get("page"):
+            pidesc.config(text="%s\n%s\nThis one is downloaded from the project's web page (no direct link): click 'Open download "
+                               "page', save the .zip, then click 'Use own image file...' and choose it." % (n.get("name", ""), n.get("description", "")))
             return
         fm = n.get("init_format") or ("none" if not n.get("local") else "detected after writing")
         setup = "supports first-boot setup" if fm in ("cloudinit", "cloudinit-rpi", "systemd") else \
@@ -3419,6 +3503,11 @@ def run_gui():
             return
         if node is None:
             messagebox.showwarning("Pi", "Pick an operating system first (or use your own image file).")
+            return
+        if node.get("page"):
+            if messagebox.askyesno("Pi", "This image is downloaded from the project's web page.\n\nOpen the page now? "
+                                   "Save the .zip, then click 'Use own image file...' and choose it."):
+                pi_open_page()
             return
         try:
             info = resolve_disk(dev[:1])
