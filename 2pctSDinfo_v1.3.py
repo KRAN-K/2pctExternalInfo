@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 r"""
-SD Card Checker  -  Micro SD / SD card health, authenticity and stability tester (Windows).
+2%SDinfo  v1.3  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
 
-GUI:   python SDCardChecker.py
-CLI:   python SDCardChecker.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
+GUI:   python 2pctSDinfo_v1.3.py
+CLI:   python 2pctSDinfo_v1.3.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
 
 What it does
   1. CARD INFO      label, filesystem, size, free space, serial, reader/bus type, model,
@@ -36,6 +36,47 @@ BLOCK = 1024 * 1024            # 1 MiB test block
 FILE_BLOCKS = 256              # 256 MiB per test file
 PREFIX = "SDCHK_"
 IS_WIN = sys.platform.startswith("win")
+
+# ----------------------------------------------------------------------------
+# App identity and version history  (add a new entry at the TOP of CHANGELOG for each release)
+# ----------------------------------------------------------------------------
+APP_NAME = "2%SDinfo"
+APP_VERSION = "1.3"
+APP_TAG = "v" + APP_VERSION
+APP_TITLE = f"{APP_NAME} {APP_TAG}"
+APP_TAGLINE = "SD card & USB drive checker, disk imager and deleted-file recovery"
+APP_REPO = "https://github.com/KRAN-K/2pctExternalInfo"
+CHANGELOG = [
+    ("1.3", "2026-11-19", [
+        "Renamed to 2%SDinfo; version shown in the title, reports and file name",
+        "About tab with version history and system details",
+        "Dark mode (remembered between launches)",
+        "Live devices panel on the right; click a device to select it in every tab",
+        "Console window hides itself when the .py is double-clicked; .bat launcher removed",
+    ]),
+    ("1.2", "2026-11-19", [
+        "Disk Imager tab: read card to image, write image to card, verify, MD5/SHA-1/SHA-256 hash",
+        "Safety locks: removable/USB/SD only, system disk refused, typed confirmation, size check",
+        "Automatic administrator prompt on start",
+    ]),
+    ("1.1", "2026-11-19", [
+        "Recover deleted files tab: read-only signature recovery for photos, documents, video and more",
+        "Skip-existing filter, disk-image-first option, output must be on another drive",
+    ]),
+    ("1.0", "2026-11-19", [
+        "Card info, integrity / fake-capacity test, speed test and 0-100 stability score",
+        "GUI and command-line modes, saved reports",
+    ]),
+]
+# Extra sections for the About tab. Add (title, [lines]) tuples here to show more information later.
+ABOUT_EXTRA = [
+    ("Good to know", [
+        "SD and microSD cards have no S.M.A.R.T. data; USB readers usually hide the CID/CSD registers.",
+        "Quick test cannot prove full capacity; only the Full test can.",
+        "To recover deleted files, stop using the card and do not run the test.",
+        "Imager writes only to removable / USB / SD disks. Your system disk is always refused.",
+    ]),
+]
 
 
 # ----------------------------------------------------------------------------
@@ -1221,7 +1262,7 @@ def hide_own_console():
         pass
 
 
-SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".sdcardchecker.json")
+SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".2pctsdinfo.json")
 
 
 def load_settings():
@@ -1261,7 +1302,7 @@ def run_cli(args):
     print("\n".join(rl))
     if args.report:
         with open(args.report, "w", encoding="utf-8") as f:
-            f.write(f"SD Card Checker report - {datetime.now():%Y-%m-%d %H:%M}\n\n")
+            f.write(f"{APP_TITLE} report - {datetime.now():%Y-%m-%d %H:%M}\n\n")
             f.write("\n".join(out + rl) + "\n")
         print(f"Report saved to {args.report}")
 
@@ -1274,7 +1315,7 @@ def run_gui():
     from tkinter import ttk, filedialog, messagebox, simpledialog
 
     root = tk.Tk()
-    root.title("SD Card Checker")
+    root.title(APP_TITLE)
     root.geometry("1300x780")
     root.minsize(980, 600)
     main = ttk.PanedWindow(root, orient="horizontal")
@@ -1288,9 +1329,11 @@ def run_gui():
     tab = ttk.Frame(nb)
     rtab = ttk.Frame(nb)
     itab = ttk.Frame(nb)
+    atab = ttk.Frame(nb)
     nb.add(tab, text="  Test & Info  ")
     nb.add(rtab, text="  Recover deleted files  ")
     nb.add(itab, text="  Disk Imager  ")
+    nb.add(atab, text="  About  ")
     q = queue.Queue()
     stop_evt = threading.Event()
     state = {"report": "", "running": False}
@@ -1347,7 +1390,7 @@ def run_gui():
     def show_info():
         p = selected_path()
         if not p:
-            messagebox.showwarning("SD Card Checker", "Select a drive first.")
+            messagebox.showwarning(APP_NAME, "Select a drive first.")
             return
         txt.delete("1.0", "end")
         status.config(text="Reading card info...")
@@ -1361,7 +1404,7 @@ def run_gui():
     def start():
         p = selected_path()
         if not p:
-            messagebox.showwarning("SD Card Checker", "Select a drive first.")
+            messagebox.showwarning(APP_NAME, "Select a drive first.")
             return
         if state["running"]:
             return
@@ -1426,13 +1469,13 @@ def run_gui():
 
     def save():
         if not state["report"]:
-            messagebox.showinfo("SD Card Checker", "Nothing to save yet.")
+            messagebox.showinfo(APP_NAME, "Nothing to save yet.")
             return
         f = filedialog.asksaveasfilename(defaultextension=".txt",
-                                         initialfile=f"SDCard_Report_{datetime.now():%Y%m%d_%H%M}.txt")
+                                         initialfile=f"2pctSDinfo_{APP_TAG}_Report_{datetime.now():%Y%m%d_%H%M}.txt")
         if f:
             with open(f, "w", encoding="utf-8") as fh:
-                fh.write(f"SD Card Checker report - {datetime.now():%Y-%m-%d %H:%M}\n\n{state['report']}\n")
+                fh.write(f"{APP_TITLE} report - {datetime.now():%Y-%m-%d %H:%M}\n\n{state['report']}\n")
 
     ttk.Button(btns, text="Card info only", command=show_info).pack(side="left")
     start_btn = ttk.Button(btns, text="Start test", command=start)
@@ -1730,12 +1773,81 @@ def run_gui():
     istop_btn.pack(side="left")
     ipoll()
 
+
+    # ---------------- About tab ----------------
+    ah = ttk.Frame(atab, padding=(12, 12, 12, 0))
+    ah.pack(fill="x")
+    ttk.Label(ah, text=APP_NAME, font=("Segoe UI", 22, "bold")).pack(side="left")
+    ttk.Label(ah, text="  " + APP_TAG, font=("Segoe UI", 16)).pack(side="left", pady=(8, 0))
+    ttk.Label(atab, text=APP_TAGLINE, padding=(12, 0)).pack(anchor="w")
+
+    def sysinfo():
+        import platform
+        rows = [
+            ("Version", f"{APP_TAG}  (released {CHANGELOG[0][1]})"),
+            ("Python", f"{platform.python_version()}  ({platform.architecture()[0]})"),
+            ("Tk", str(tk.TkVersion)),
+            ("Windows" if IS_WIN else "System", platform.platform()),
+            ("Administrator", "yes" if is_admin() else "no (recovery and imager need it)"),
+            ("Script", os.path.abspath(__file__)),
+            ("Settings file", SETTINGS_FILE),
+            ("Project", APP_REPO),
+        ]
+        return rows
+
+    af = ttk.Frame(atab, padding=(12, 10))
+    af.pack(fill="x")
+    for r_, (k_, v_) in enumerate(sysinfo()):
+        ttk.Label(af, text=k_ + ":", font=("Segoe UI", 9, "bold")).grid(row=r_, column=0, sticky="nw", padx=(0, 10), pady=1)
+        ttk.Label(af, text=v_, wraplength=620, justify="left").grid(row=r_, column=1, sticky="w", pady=1)
+
+    def copy_diag():
+        lines = [f"{APP_TITLE}"] + [f"{k}: {v}" for k, v in sysinfo()]
+        root.clipboard_clear()
+        root.clipboard_append("\n".join(lines))
+        astatus.config(text="Diagnostics copied to the clipboard.")
+
+    def open_repo():
+        import webbrowser
+        webbrowser.open(APP_REPO)
+
+    abtn = ttk.Frame(atab, padding=(12, 0))
+    abtn.pack(fill="x")
+    ttk.Button(abtn, text="Copy diagnostics", command=copy_diag).pack(side="left")
+    ttk.Button(abtn, text="Open project page", command=open_repo).pack(side="left", padx=6)
+    astatus = ttk.Label(abtn, text="")
+    astatus.pack(side="left", padx=8)
+
+    abox = ttk.Frame(atab)
+    abox.pack(fill="both", expand=True, padx=12, pady=10)
+    asb = ttk.Scrollbar(abox, orient="vertical")
+    asb.pack(side="right", fill="y")
+    atxt = tk.Text(abox, font=("Segoe UI", 10), wrap="word", height=10, relief="flat", cursor="arrow",
+                   yscrollcommand=asb.set)
+    atxt.pack(side="left", fill="both", expand=True)
+    asb.config(command=atxt.yview)
+    atxt.tag_configure("h", font=("Segoe UI", 12, "bold"), spacing1=8, spacing3=2)
+    atxt.tag_configure("v", font=("Segoe UI", 10, "bold"), spacing1=6)
+    atxt.insert("end", "Version history\n", "h")
+    for ver, date, items in CHANGELOG:
+        atxt.insert("end", f"v{ver}   {date}\n", "v")
+        for it in items:
+            atxt.insert("end", f"   • {it}\n")
+    atxt.insert("end", "Recovery supports\n", "h")
+    atxt.insert("end", "   " + ", ".join(k.upper() for k, *_ in TYPES) + "  (DOCX/XLSX/PPTX/APK detected inside ZIP, "
+                "HEIC/MOV/3GP/M4A inside MP4)\n")
+    for title_, lines_ in ABOUT_EXTRA:
+        atxt.insert("end", title_ + "\n", "h")
+        for ln_ in lines_:
+            atxt.insert("end", f"   • {ln_}\n")
+    atxt.config(state="disabled")
+
     # ---------------- Devices panel (right) + dark mode ----------------
     settings = load_settings()
     dark_var = tk.BooleanVar(value=bool(settings.get("dark")))
     style = ttk.Style()
     orig_theme = style.theme_use()
-    text_widgets = [txt, rtxt, itxt]
+    text_widgets = [txt, rtxt, itxt, atxt]
     warn_labels = [warn, iwarn]
     pal_light = {"bg": style.lookup("TFrame", "background") or "#f0f0f0", "fg": "#000000", "field": "#ffffff",
                  "warn": "#b00020", "ok": "#1b7f3b", "dim": "#666666", "accent": "#3b82c4", "border": "#a0a0a0"}
@@ -1946,7 +2058,7 @@ def relaunch_as_admin():
 
 
 def main():
-    ap = argparse.ArgumentParser(description="SD Card Checker")
+    ap = argparse.ArgumentParser(description=APP_TITLE + " - " + APP_TAGLINE)
     ap.add_argument("--cli", metavar="PATH", help="run without GUI on this drive/folder, e.g. E:\\")
     ap.add_argument("--mode", choices=["quick", "full"], default="quick")
     ap.add_argument("--size", type=int, default=512, help="MB for quick mode")
@@ -1962,6 +2074,7 @@ def main():
     ap.add_argument("--hash", metavar="FILE", help="print MD5 / SHA-1 / SHA-256 of a file")
     ap.add_argument("--yes", action="store_true", help="skip the confirmation for --write-image")
     ap.add_argument("--no-verify", action="store_true", help="skip verification after --write-image")
+    ap.add_argument("--version", action="version", version=APP_TITLE)
     ap.add_argument("--no-admin", action="store_true", help="do not ask for administrator rights")
     a = ap.parse_args()
     needs_admin = (not a.cli or a.image or a.recover or a.write_image or a.verify) and not a.hash
