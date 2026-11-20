@@ -15,12 +15,11 @@ For `SDCardChecker.py` on Windows 10/11. Tests micro SD cards and USB drives for
 1. **Check Python:** press Win+R, type `cmd`, run `python --version`. If it shows 3.9 or higher, skip to step 3.
 2. **Install Python:** download from python.org/downloads. On the first screen tick **Add python.exe to PATH**, click Install Now, then confirm with `python --version` in a new Command Prompt. Tkinter is included.
 3. **Place the file:** create `D:\Claude` and copy `SDCardChecker.py` into it.
-4. **Start it:**
-   ```
-   cd /d D:\Claude
-   python SDCardChecker.py
-   ```
-5. Optional shortcut target: `pythonw.exe "D:\Claude\SDCardChecker.py"` (no console window).
+4. **Start it by double-clicking `SDCardChecker.bat`** (keep it in the same folder as `SDCardChecker.py`). It opens the app with no console window and Windows asks for administrator rights, which the recovery tab needs. Click Yes. If you click No, the Test tab still works but recovery will say access denied.
+   - If Python is missing, the launcher installs it with winget. When it finishes, double-click the file again.
+   - Double-clicking `SDCardChecker.py` directly also works if Python is installed.
+   - Manual start: `python SDCardChecker.py` (add `--no-admin` to skip the administrator prompt).
+5. Optional: right-click `SDCardChecker.bat`, Send to, Desktop (create shortcut).
 
 ## 3. Preparing the card
 
@@ -80,7 +79,7 @@ The **Recover deleted files** tab scans the card read-only and rebuilds deleted 
 1. **Stop using the card immediately.** New writes can permanently overwrite deleted files.
 2. **Do not format** the card and **do not run the test**.
 3. Put the card in a PC reader.
-4. Start the program as **administrator** (right-click Command Prompt or PowerShell, Run as administrator, then `python D:\Claude\SDCardChecker.py`). Raw card reads need admin rights.
+4. Start the program with `SDCardChecker.bat` and click **Yes** on the administrator prompt. Raw card reads need admin rights.
 
 ### Steps
 

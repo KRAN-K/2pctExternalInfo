@@ -12,9 +12,15 @@ See [MANUAL.md](MANUAL.md) for the full installation and usage guide.
 
 ## Quick start
 
+Double-click **`SDCardChecker.bat`**. It starts the app, asks for administrator rights (needed for recovery) and installs Python with winget if it is missing. Keep it in the same folder as `SDCardChecker.py`.
+
+Or from a terminal:
+
 ```
 python SDCardChecker.py
 ```
+
+Add `--no-admin` to skip the administrator prompt.
 
 Command line:
 

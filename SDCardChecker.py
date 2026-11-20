@@ -1314,6 +1314,31 @@ def run_gui():
     root.mainloop()
 
 
+def is_admin():
+    if not IS_WIN:
+        return os.geteuid() == 0 if hasattr(os, "geteuid") else False
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def relaunch_as_admin():
+    """Re-start this script with a UAC prompt. Returns True if the new copy was started."""
+    try:
+        import ctypes
+        exe = sys.executable
+        w = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if os.path.exists(w):
+            exe = w                              # no console window
+        script = os.path.abspath(__file__)
+        params = " ".join('"%s"' % a for a in [script] + sys.argv[1:])
+        return ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1) > 32
+    except Exception:
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description="SD Card Checker")
     ap.add_argument("--cli", metavar="PATH", help="run without GUI on this drive/folder, e.g. E:\\")
@@ -1325,7 +1350,12 @@ def main():
     ap.add_argument("--types", default="", help="comma list of groups: Photos,Documents,Video,Audio_Video,Other")
     ap.add_argument("--keep-existing", action="store_true", help="also recover files that still exist")
     ap.add_argument("--image", nargs=2, metavar=("SRC", "DEST"), help="make a sector image of the card first")
+    ap.add_argument("--no-admin", action="store_true", help="do not ask for administrator rights")
     a = ap.parse_args()
+    needs_admin = not a.cli or a.image or a.recover
+    if IS_WIN and needs_admin and not a.no_admin and not is_admin():
+        if relaunch_as_admin():
+            return                               # elevated copy is running
     if a.image:
         image_card(a.image[0], a.image[1])
     elif a.recover:
