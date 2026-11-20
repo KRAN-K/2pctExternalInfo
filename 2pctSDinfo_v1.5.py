@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+# NEED PYTHON? Download the Windows installer here (copy and paste into your browser): https://www.python.org/downloads/windows/
+# On the first installer screen tick "Add python.exe to PATH", click Install Now, then double-click this file (2pctSDinfo).
 r"""
 2%SDinfo  v1.5  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
 
@@ -53,6 +54,7 @@ CHANGELOG = [
         "Built-in FAT32 formatter for cards above 32 GB, which Windows refuses to format as FAT32",
         "Eject button and right-click menu in the devices panel",
         "Operations only run on removable / USB / SD disks; system and internal disks are protected",
+        "Python download link at the top of the file for anyone who opens it in a text editor",
     ]),
     ("1.4", "2026-11-19", [
         "Theme dropdown replaces the dark-mode checkbox: Light, Dark, Dark Gray, Crimson Eclipse (black and red), Deep Ocean (navy and cyan)",
