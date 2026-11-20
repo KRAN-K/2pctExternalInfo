@@ -1,10 +1,10 @@
 # NEED PYTHON? Download the Windows installer here (copy and paste into your browser): https://www.python.org/downloads/windows/
 # On the first installer screen tick "Add python.exe to PATH", click Install Now, then double-click this file (2pctSDinfo).
 r"""
-2%SDinfo  v1.5  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
+2%SDinfo  v1.6  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
 
-GUI:   python 2pctSDinfo_v1.5.py
-CLI:   python 2pctSDinfo_v1.5.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
+GUI:   python 2pctSDinfo_v1.6.py
+CLI:   python 2pctSDinfo_v1.6.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
 
 What it does
   1. CARD INFO      label, filesystem, size, free space, serial, reader/bus type, model,
@@ -42,12 +42,17 @@ IS_WIN = sys.platform.startswith("win")
 # App identity and version history  (add a new entry at the TOP of CHANGELOG for each release)
 # ----------------------------------------------------------------------------
 APP_NAME = "2%SDinfo"
-APP_VERSION = "1.5"
+APP_VERSION = "1.6"
 APP_TAG = "v" + APP_VERSION
 APP_TITLE = f"{APP_NAME} {APP_TAG}"
 APP_TAGLINE = "SD card & USB drive checker, disk imager and deleted-file recovery"
 APP_REPO = "https://github.com/KRAN-K/2pctExternalInfo"
 CHANGELOG = [
+    ("1.6", "2026-11-19", [
+        "Themes renamed: Dark is now Black (true black), Dark Gray is now Gray and much lighter",
+        "New theme: Violet Haze (purple)",
+        "Your saved theme carries over from the old names",
+    ]),
     ("1.5", "2026-11-19", [
         "Partitions tab (AOMEI-style): colored disk map, partition list, format, create, delete, resize, label, drive letter",
         "Initialize (MBR/GPT), Clean disk and Wipe disk (zero fill)",
@@ -1296,15 +1301,18 @@ def save_settings(d):
 
 THEMES = {
     "Light": None,
-    "Dark": {"bg": "#1e1f22", "fg": "#e6e6e6", "field": "#2b2d30", "btn": "#3a3d41", "btn_hi": "#4a4e54",
-             "accent": "#3b82c4", "warn": "#ff7b72", "ok": "#5fd47f", "dim": "#9aa0a6", "border": "#43464b"},
-    "Dark Gray": {"bg": "#2d2d2d", "fg": "#ececec", "field": "#3a3a3a", "btn": "#4a4a4a", "btn_hi": "#5c5c5c",
-                  "accent": "#7a8794", "warn": "#ff8a80", "ok": "#8bd48b", "dim": "#ababab", "border": "#5a5a5a"},
+    "Black": {"bg": "#000000", "fg": "#e8e8e8", "field": "#0e0e0e", "btn": "#1a1a1a", "btn_hi": "#2b2b2b",
+              "accent": "#3b82c4", "warn": "#ff7b72", "ok": "#5fd47f", "dim": "#8a8a8a", "border": "#333333"},
+    "Gray": {"bg": "#5b5b5b", "fg": "#ffffff", "field": "#6a6a6a", "btn": "#777777", "btn_hi": "#888888",
+             "accent": "#3f6f9f", "warn": "#ffc2bb", "ok": "#c4f5c4", "dim": "#d6d6d6", "border": "#8f8f8f"},
     "Crimson Eclipse": {"bg": "#0a0a0a", "fg": "#f2e9e9", "field": "#160c0c", "btn": "#2a0d0d", "btn_hi": "#4d1313",
                         "accent": "#d0021b", "warn": "#ff4d4d", "ok": "#ffd166", "dim": "#a77a7a", "border": "#5c1616"},
     "Deep Ocean": {"bg": "#0b1e2d", "fg": "#dff3ff", "field": "#102a3d", "btn": "#16405a", "btn_hi": "#1f5a7d",
                    "accent": "#00a8cc", "warn": "#ff8fa3", "ok": "#7be0b0", "dim": "#7fa8c0", "border": "#1e4a66"},
+    "Violet Haze": {"bg": "#1a1230", "fg": "#f0e9ff", "field": "#241a42", "btn": "#3a2a6b", "btn_hi": "#4e3a8c",
+                    "accent": "#9b5de5", "warn": "#ff7aa8", "ok": "#8ef0c0", "dim": "#a99bd0", "border": "#4a3a80"},
 }
+LEGACY_THEMES = {"Dark": "Black", "Dark Gray": "Gray"}      # names used by v1.3 - v1.5
 
 
 # ----------------------------------------------------------------------------
@@ -2647,7 +2655,8 @@ def run_gui():
 
     # ---------------- Devices panel (right) + themes ----------------
     settings = load_settings()
-    theme0 = settings.get("theme") or ("Dark" if settings.get("dark") else "Light")
+    theme0 = settings.get("theme") or ("Black" if settings.get("dark") else "Light")
+    theme0 = LEGACY_THEMES.get(theme0, theme0)
     theme_var = tk.StringVar(value=theme0 if theme0 in THEMES else "Light")
     style = ttk.Style()
     orig_theme = style.theme_use()
