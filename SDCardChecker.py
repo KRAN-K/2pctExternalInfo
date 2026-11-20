@@ -87,6 +87,8 @@ if($part){
   $out.DiskSerial=$d.SerialNumber; $out.BusType="$($d.BusType)"; $out.PartitionStyle="$($d.PartitionStyle)"
   $out.Health="$($d.HealthStatus)"; $out.Operational="$($d.OperationalStatus)"
   $out.DiskSize=$d.Size; $out.LogicalSector=$d.LogicalSectorSize; $out.PhysicalSector=$d.PhysicalSectorSize
+  $out.IsSystem=$d.IsSystem; $out.IsBoot=$d.IsBoot
+  $out.Letters=@(Get-Partition -DiskNumber $d.Number | Where-Object { $_.DriveLetter } | ForEach-Object { "$($_.DriveLetter)" })
   $out.Firmware=$d.FirmwareVersion; $out.IsReadOnly=$d.IsReadOnly; $out.PartitionOffset=$part.Offset
   $out.PartitionCount=(Get-Partition -DiskNumber $d.Number | Measure-Object).Count
   $pd=Get-PhysicalDisk | Where-Object { $_.DeviceId -eq "$($d.Number)" }
@@ -500,6 +502,7 @@ class RawReader:
             self.is_dev = True
         else:
             self.path = src
+            self.is_dev = src.startswith("\\\\.\\")
         try:
             self.f = open(self.path, "rb", buffering=0)
         except PermissionError:
@@ -949,11 +952,18 @@ def recover_files(src, outdir, groups=None, skip_existing=True, log=print, progr
     return found
 
 
-def image_card(src, dest, log=print, progress=None, stop=None):
-    """Make a sector-by-sector copy of the card (bad areas are zero-filled)."""
+def image_card(src, dest, log=print, progress=None, stop=None, whole_disk=False):
+    """Make a sector-by-sector copy of the card (bad areas are zero-filled).
+    whole_disk=True copies the entire physical disk (all partitions, like a Raspberry Pi image)."""
     stop = stop or threading.Event()
     progress = progress or (lambda f, s: None)
-    if same_volume(src, dest):
+    letters = [src[:1].upper()] if IS_WIN and len(src) >= 2 and src[1] == ":" else []
+    if whole_disk and IS_WIN and letters:
+        d = resolve_disk(letters[0])
+        letters = d["letters"]
+        src = d["path"]
+        log(f"Reading whole disk {d['number']} ({fmt_size(d['size'])}), volumes: {', '.join(letters)}")
+    if IS_WIN and os.path.splitdrive(os.path.abspath(dest))[0][:1].upper() in letters:
         raise ValueError("Save the image on a different drive than the card.")
     rd = RawReader(src)
     bad = 0
@@ -984,6 +994,187 @@ def image_card(src, dest, log=print, progress=None, stop=None):
 
 
 # ----------------------------------------------------------------------------
+# DISK IMAGER  (read / write / verify / hash raw images, like Win32 Disk Imager)
+# ----------------------------------------------------------------------------
+SAFE_BUS = ("USB", "SD", "MMC")
+
+
+def hash_file(path, progress=None, stop=None):
+    """MD5, SHA-1 and SHA-256 of a file in one pass."""
+    hs = {"MD5": hashlib.md5(), "SHA1": hashlib.sha1(), "SHA256": hashlib.sha256()}
+    total = os.path.getsize(path)
+    done = 0
+    with open(path, "rb") as f:
+        while True:
+            if stop is not None and stop.is_set():
+                raise Stopped()
+            b = f.read(4 * MB)
+            if not b:
+                break
+            for h in hs.values():
+                h.update(b)
+            done += len(b)
+            if progress:
+                progress(done / max(1, total), "Hashing")
+    return {k: v.hexdigest() for k, v in hs.items()}
+
+
+def resolve_disk(letter):
+    """Windows: drive letter -> physical disk details with safety verdict."""
+    letter = letter.strip().rstrip("\\/:").upper()
+    if not (IS_WIN and len(letter) == 1 and letter.isalpha()):
+        raise ValueError("Pick a drive letter such as E:")
+    w = get_card_info(letter + ":\\").get("wmi") or {}
+    if w.get("DiskNumber") is None:
+        raise RuntimeError("Could not identify the physical disk behind " + letter + ":")
+    letters = w.get("Letters") or []
+    if isinstance(letters, str):
+        letters = [letters]
+    d = {
+        "number": int(w["DiskNumber"]),
+        "path": "\\\\.\\PhysicalDrive%d" % int(w["DiskNumber"]),
+        "letters": [x.upper() for x in letters] or [letter],
+        "bus": str(w.get("BusType", "")),
+        "size": w.get("DiskSize"),
+        "model": w.get("Model") or w.get("FriendlyName") or "",
+        "system": bool(w.get("IsSystem")) or bool(w.get("IsBoot")),
+    }
+    d["safe"] = d["bus"].upper() in SAFE_BUS and not d["system"]
+    return d
+
+
+class LockedDisk:
+    """Windows: lock + dismount every volume on a disk so raw writes are allowed."""
+
+    def __init__(self, letters):
+        self.letters = letters
+        self.fds = []
+
+    def __enter__(self):
+        if not IS_WIN:
+            return self
+        import ctypes
+        import msvcrt
+        for L in self.letters:
+            try:
+                fd = os.open("\\\\.\\%s:" % L, os.O_RDWR | os.O_BINARY)
+            except OSError as e:
+                raise RuntimeError(f"Cannot open {L}: for locking ({e}). Run as administrator.")
+            self.fds.append(fd)
+            h = msvcrt.get_osfhandle(fd)
+            ret = ctypes.c_ulong(0)
+            k = ctypes.windll.kernel32
+            if not k.DeviceIoControl(h, 0x00090018, None, 0, None, 0, ctypes.byref(ret), None):
+                raise RuntimeError(f"Could not lock {L}: - close Explorer windows and programs using it.")
+            k.DeviceIoControl(h, 0x00090020, None, 0, None, 0, ctypes.byref(ret), None)  # dismount
+        return self
+
+    def __exit__(self, *a):
+        for fd in self.fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _refresh_partitions(f):
+    if not IS_WIN:
+        return
+    try:
+        import ctypes
+        import msvcrt
+        ret = ctypes.c_ulong(0)
+        ctypes.windll.kernel32.DeviceIoControl(msvcrt.get_osfhandle(f.fileno()), 0x70140,
+                                               None, 0, None, 0, ctypes.byref(ret), None)
+    except Exception:
+        pass
+
+
+def write_image(img, target, letters=(), verify=True, log=print, progress=None, stop=None):
+    """Write a raw image file onto target (\\\\.\\PhysicalDriveN, or a file for testing)."""
+    stop = stop or threading.Event()
+    progress = progress or (lambda f, s: None)
+    size = os.path.getsize(img)
+    if size == 0:
+        raise ValueError("Image file is empty.")
+    rd = RawReader(target)
+    dev_size = rd.size
+    rd.close()
+    if size > dev_size:
+        raise ValueError(f"Image ({fmt_size(size)}) is larger than the target ({fmt_size(dev_size)}). Nothing written.")
+    log(f"Writing {fmt_size(size)} to {target} ...")
+    src_hash = hashlib.sha256()
+    t0 = time.time()
+    locked = LockedDisk(list(letters)) if (IS_WIN and letters) else None
+    if locked:
+        locked.__enter__()
+    try:
+        with open(img, "rb") as fi, open(target, "r+b", buffering=0) as fo:
+            done = 0
+            while done < size:
+                if stop.is_set():
+                    raise Stopped()
+                b = fi.read(min(4 * MB, size - done))
+                if not b:
+                    break
+                src_hash.update(b)
+                pad = (-len(b)) % ALIGN
+                fo.write(b + b"\0" * pad)
+                done += len(b)
+                progress(done / size * (0.5 if verify else 1.0), "Writing")
+            try:
+                fo.flush()
+                os.fsync(fo.fileno())
+            except OSError:
+                pass
+            _refresh_partitions(fo)
+    finally:
+        if locked:
+            locked.__exit__()
+    mbps = size / 1e6 / max(0.001, time.time() - t0)
+    log(f"Write finished: {fmt_size(size)} at {mbps:.1f} MB/s.")
+    if verify:
+        ok = verify_image(img, target, log=log,
+                          progress=lambda f, s: progress(0.5 + f * 0.5, "Verifying"), stop=stop)
+        return ok
+    return True
+
+
+def verify_image(img, target, log=print, progress=None, stop=None):
+    """Compare an image file with the start of target. Returns True when identical."""
+    stop = stop or threading.Event()
+    size = os.path.getsize(img)
+    rd = RawReader(target)
+    bad_at = None
+    try:
+        with open(img, "rb") as fi:
+            done = 0
+            while done < size:
+                if stop.is_set():
+                    raise Stopped()
+                n = min(4 * MB, size - done)
+                a = fi.read(n)
+                b = rd.read_at(done, n)
+                if a != b:
+                    for i in range(0, len(a), 512):
+                        if a[i:i + 512] != b[i:i + 512]:
+                            bad_at = done + i
+                            break
+                    break
+                done += n
+                if progress:
+                    progress(done / size, "Verifying")
+    finally:
+        rd.close()
+    if bad_at is None:
+        log("VERIFY OK: the card matches the image exactly.")
+        return True
+    log(f"VERIFY FAILED: first difference at byte {bad_at} (sector {bad_at // 512}). "
+        "The card may be faulty or fake - run the Test tab.")
+    return False
+
+
+# ----------------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------------
 def run_cli(args):
@@ -1007,7 +1198,7 @@ def run_cli(args):
 # ----------------------------------------------------------------------------
 def run_gui():
     import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox
+    from tkinter import ttk, filedialog, messagebox, simpledialog
 
     root = tk.Tk()
     root.title("SD Card Checker")
@@ -1016,8 +1207,10 @@ def run_gui():
     nb.pack(fill="both", expand=True)
     tab = ttk.Frame(nb)
     rtab = ttk.Frame(nb)
+    itab = ttk.Frame(nb)
     nb.add(tab, text="  Test & Info  ")
     nb.add(rtab, text="  Recover deleted files  ")
+    nb.add(itab, text="  Disk Imager  ")
     q = queue.Queue()
     stop_evt = threading.Event()
     state = {"report": "", "running": False}
@@ -1304,9 +1497,176 @@ def run_gui():
     rstop_btn.pack(side="left")
     rpoll()
 
+
+    # ---------------- Disk Imager tab ----------------
+    tk.Label(itab, justify="left", fg="#b00020", wraplength=820, anchor="w",
+             text="WRITE ERASES THE WHOLE CARD. Only removable / USB / SD disks are allowed; your system "
+                  "drive is blocked. Needs 'Yes' on the administrator prompt. Close Explorer windows on the card first."
+             ).pack(fill="x", padx=8, pady=6)
+    imf = ttk.Frame(itab, padding=8)
+    imf.pack(fill="x")
+    ttk.Label(imf, text="Image file:").grid(row=0, column=0, sticky="w")
+    imgvar = tk.StringVar()
+    ttk.Entry(imf, textvariable=imgvar, width=58).grid(row=0, column=1, padx=6, pady=2)
+
+    def pick_open():
+        f = filedialog.askopenfilename(title="Image to write / verify / hash",
+                                       filetypes=[("Disk images", "*.img *.iso *.bin *.dd"), ("All files", "*.*")])
+        if f:
+            imgvar.set(f)
+
+    def pick_save():
+        f = filedialog.asksaveasfilename(title="Save image as", defaultextension=".img",
+                                         initialfile="card_backup.img")
+        if f:
+            imgvar.set(f)
+
+    ttk.Button(imf, text="Open...", command=pick_open).grid(row=0, column=2)
+    ttk.Button(imf, text="Save as...", command=pick_save).grid(row=0, column=3, padx=4)
+    ttk.Label(imf, text="Device:").grid(row=1, column=0, sticky="w")
+    icombo = ttk.Combobox(imf, values=[d[1] for d in drives], width=55, state="readonly")
+    if drives:
+        icombo.current(0)
+    icombo.grid(row=1, column=1, padx=6, pady=2)
+
+    def irefresh():
+        refresh()
+        icombo["values"] = [d[1] for d in drives]
+        if drives:
+            icombo.current(0)
+
+    ttk.Button(imf, text="Refresh", command=irefresh).grid(row=1, column=2)
+    whole_var = tk.BooleanVar(value=True)
+    verify_var = tk.BooleanVar(value=True)
+    of = ttk.Frame(itab, padding=(8, 0))
+    of.pack(fill="x")
+    ttk.Checkbutton(of, text="Read whole disk (all partitions, e.g. a Raspberry Pi card)", variable=whole_var).pack(side="left")
+    ttk.Checkbutton(of, text="Verify after write", variable=verify_var).pack(side="left", padx=12)
+    ib = ttk.Frame(itab, padding=8)
+    ib.pack(fill="x")
+    ipb = ttk.Progressbar(itab, maximum=100)
+    ipb.pack(fill="x", padx=8)
+    istatus = ttk.Label(itab, text="Idle")
+    istatus.pack(anchor="w", padx=8)
+    itxt = tk.Text(itab, font=("Consolas", 10), wrap="none")
+    itxt.pack(fill="both", expand=True, padx=8, pady=8)
+    iq = queue.Queue()
+    istop = threading.Event()
+    istate = {"running": False}
+
+    def idev():
+        sel = icombo.get().strip()
+        for d in drives:
+            if d[1] == sel:
+                return d[0]
+        return None
+
+    def ilog(m):
+        itxt.insert("end", m + "\n")
+        itxt.see("end")
+
+    def ibusy(b):
+        istate["running"] = b
+        for w_ in (ibtn_read, ibtn_write, ibtn_verify, ibtn_hash):
+            w_.config(state="disabled" if b else "normal")
+        istop_btn.config(state="normal" if b else "disabled")
+
+    def istart(kind):
+        if istate["running"]:
+            return
+        img = imgvar.get().strip()
+        dev = idev()
+        if kind in ("write", "verify", "hash") and not os.path.isfile(img):
+            messagebox.showwarning("Disk Imager", "Choose an existing image file first.")
+            return
+        if kind in ("read", "write", "verify") and not dev:
+            messagebox.showwarning("Disk Imager", "Select a device first.")
+            return
+        if kind == "read" and not img:
+            messagebox.showwarning("Disk Imager", "Choose where to save the image (Save as...).")
+            return
+        info = None
+        if kind in ("write", "verify"):
+            try:
+                info = resolve_disk(dev[:1])
+            except Exception as e:
+                messagebox.showerror("Disk Imager", str(e))
+                return
+        if kind == "write":
+            if not info["safe"]:
+                messagebox.showerror("Disk Imager", f"Refusing: disk {info['number']} is not a removable/USB/SD "
+                                     f"disk (bus: {info['bus']}, system disk: {info['system']}).")
+                return
+            if os.path.getsize(img) > (info["size"] or 0):
+                messagebox.showerror("Disk Imager", "The image is larger than the card. Nothing was written.")
+                return
+            ans = simpledialog.askstring(
+                "Confirm WRITE",
+                f"ALL DATA on disk {info['number']} will be destroyed:\n"
+                f"  {info['model']}  {fmt_size(info['size'])}  volumes {', '.join(info['letters'])}\n\n"
+                f"Type the drive letter ({dev[0]}) to confirm:")
+            if not ans or ans.strip().upper().rstrip(":") != dev[0].upper():
+                return
+        itxt.delete("1.0", "end")
+        istop.clear()
+        ibusy(True)
+
+        def work():
+            lg = lambda m: iq.put(("log", m))
+            pg = lambda f, s_: iq.put(("prog", (f, s_)))
+            try:
+                if kind == "read":
+                    image_card(dev, img, lg, pg, istop, whole_disk=whole_var.get())
+                elif kind == "write":
+                    r = write_image(img, info["path"], info["letters"], verify_var.get(), lg, pg, istop)
+                    lg("DONE: image written." + ("" if verify_var.get() else " (not verified)") if r else
+                       "Finished with errors.")
+                elif kind == "verify":
+                    verify_image(img, info["path"], lg, pg, istop)
+                else:
+                    lg("Hashing " + img)
+                    for k, v in hash_file(img, pg, istop).items():
+                        lg(f"{k:7s}: {v}")
+            except Stopped:
+                lg("Stopped by user.")
+            except Exception as e:
+                lg(f"ERROR: {e}")
+            iq.put(("done", None))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def ipoll():
+        try:
+            while True:
+                k, v = iq.get_nowait()
+                if k == "log":
+                    ilog(v)
+                elif k == "prog":
+                    ipb["value"] = v[0] * 100
+                    istatus.config(text=f"{v[1]}... {v[0] * 100:.0f}%")
+                else:
+                    ibusy(False)
+                    istatus.config(text="Finished")
+        except queue.Empty:
+            pass
+        root.after(150, ipoll)
+
+    ibtn_read = ttk.Button(ib, text="Read card to image", command=lambda: istart("read"))
+    ibtn_read.pack(side="left")
+    ibtn_write = ttk.Button(ib, text="Write image to card", command=lambda: istart("write"))
+    ibtn_write.pack(side="left", padx=6)
+    ibtn_verify = ttk.Button(ib, text="Verify", command=lambda: istart("verify"))
+    ibtn_verify.pack(side="left")
+    ibtn_hash = ttk.Button(ib, text="Hash image", command=lambda: istart("hash"))
+    ibtn_hash.pack(side="left", padx=6)
+    istop_btn = ttk.Button(ib, text="Stop", command=istop.set, state="disabled")
+    istop_btn.pack(side="left")
+    ipoll()
+
     def on_close():
         stop_evt.set()
         rstop.set()
+        istop.set()
         root.after(300, root.destroy)
 
     root.protocol("WM_DELETE_WINDOW", on_close)
@@ -1350,14 +1710,38 @@ def main():
     ap.add_argument("--types", default="", help="comma list of groups: Photos,Documents,Video,Audio_Video,Other")
     ap.add_argument("--keep-existing", action="store_true", help="also recover files that still exist")
     ap.add_argument("--image", nargs=2, metavar=("SRC", "DEST"), help="make a sector image of the card first")
+    ap.add_argument("--whole-disk", action="store_true", help="with --image: copy the whole physical disk")
+    ap.add_argument("--write-image", nargs=2, metavar=("IMG", "DRIVE"), help="write IMG to the card at DRIVE (ERASES IT)")
+    ap.add_argument("--verify", nargs=2, metavar=("IMG", "DRIVE"), help="compare IMG with the card")
+    ap.add_argument("--hash", metavar="FILE", help="print MD5 / SHA-1 / SHA-256 of a file")
+    ap.add_argument("--yes", action="store_true", help="skip the confirmation for --write-image")
+    ap.add_argument("--no-verify", action="store_true", help="skip verification after --write-image")
     ap.add_argument("--no-admin", action="store_true", help="do not ask for administrator rights")
     a = ap.parse_args()
-    needs_admin = not a.cli or a.image or a.recover
+    needs_admin = (not a.cli or a.image or a.recover or a.write_image or a.verify) and not a.hash
     if IS_WIN and needs_admin and not a.no_admin and not is_admin():
         if relaunch_as_admin():
             return                               # elevated copy is running
-    if a.image:
-        image_card(a.image[0], a.image[1])
+    if a.hash:
+        for k, v in hash_file(a.hash).items():
+            print(f"{k:7s}: {v}")
+    elif a.write_image:
+        img, drv = a.write_image
+        d = resolve_disk(drv)
+        if not d["safe"]:
+            sys.exit(f"Refusing: disk {d['number']} is not a removable/USB/SD disk (bus {d['bus']}, system {d['system']}).")
+        print(f"About to ERASE disk {d['number']}: {d['model']} {fmt_size(d['size'])}, volumes {', '.join(d['letters'])}")
+        if not a.yes and input("Type YES to continue: ").strip() != "YES":
+            sys.exit("Cancelled.")
+        ok = write_image(img, d["path"], d["letters"], not a.no_verify)
+        sys.exit(0 if ok else 1)
+    elif a.verify:
+        tgt = a.verify[1]
+        if len(tgt.rstrip("\\/:")) == 1:                 # drive letter -> physical disk
+            tgt = resolve_disk(tgt)["path"]
+        sys.exit(0 if verify_image(a.verify[0], tgt) else 1)
+    elif a.image:
+        image_card(a.image[0], a.image[1], whole_disk=a.whole_disk)
     elif a.recover:
         if not a.out:
             ap.error("--recover needs --out FOLDER")

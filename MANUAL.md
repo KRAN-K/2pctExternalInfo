@@ -111,7 +111,44 @@ The **Recover deleted files** tab scans the card read-only and rebuilds deleted 
 - For failing cards, make an image first. Unreadable areas are zero-filled.
 - Hardware-encrypted or physically dead cards cannot be recovered.
 
-## 8. Command line
+## 8. Disk Imager tab (like Win32 Disk Imager)
+
+Read a whole card to an image file, write an image back to a card (for example a Raspberry Pi OS image), verify, and hash.
+
+**Safety rules built in**
+- Only removable, USB and SD disks can be written. Your system and boot disks are refused.
+- You must type the card's drive letter to confirm a write.
+- An image larger than the card is refused before anything is written.
+- Volumes on the card are locked and dismounted before writing. Close Explorer windows on the card first.
+
+**Read card to image (backup)**
+1. Choose the **Device**, then click **Save as...** and pick a file on a different drive.
+2. Leave **Read whole disk** ticked to copy every partition (needed for Pi cards). Untick it to copy only the selected volume.
+3. Click **Read card to image**. Unreadable areas are zero-filled and counted.
+
+**Write image to card (flash)**
+1. Click **Open...** and pick the `.img`, `.iso`, `.bin` or `.dd` file. Compressed files (`.zip`, `.xz`, `.gz`) must be extracted first.
+2. Choose the **Device**. Check the drive letter and size twice.
+3. Leave **Verify after write** ticked.
+4. Click **Write image to card**, read the warning, type the drive letter and confirm.
+5. When it finishes, Windows may ask to format the new partitions. Click Cancel. Eject the card.
+
+**Verify:** compares the image with the card and reports the first differing sector. A failure on a fresh write often means a faulty or fake card; run the Test tab.
+
+**Hash image:** shows MD5, SHA-1 and SHA-256 so you can compare with the download page.
+
+Command line:
+
+```
+python SDCardChecker.py --image E:\ D:\Claude\card.img --whole-disk
+python SDCardChecker.py --write-image D:\Claude\pi.img E:\
+python SDCardChecker.py --verify D:\Claude\pi.img E:\
+python SDCardChecker.py --hash D:\Claude\pi.img
+```
+
+Add `--yes` to skip the typed confirmation and `--no-verify` to skip verification after a write.
+
+## 9. Command line
 
 ```
 python SDCardChecker.py --cli E:\ --mode quick --size 512 --report D:\Claude\report.txt
@@ -133,7 +170,7 @@ python SDCardChecker.py --recover E:\ --out D:\Claude\Recovered --types Photos,D
 | `--types` | Photos, Documents, Video, Audio_Video, Other |
 | `--keep-existing` | Also recover files that still exist |
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Problem | Fix |
 |---|---|
@@ -141,20 +178,21 @@ python SDCardChecker.py --recover E:\ --out D:\Claude\Recovered --types Photos,D
 | `No module named tkinter` | Re-run the Python installer, Modify, enable tcl/tk and IDLE |
 | Card not listed | Click Refresh, check Disk Management for a drive letter, or use Browse folder |
 | Device details show n/a | Some readers hide them. Try a different reader or run as administrator |
-| Access denied in recovery | Start the program as administrator |
+| Access denied in recovery or imager | Start with `SDCardChecker.bat` and click Yes on the administrator prompt |
+| Cannot lock the card when writing | Close Explorer windows, backup tools and anything using the card, then retry |
 | Write error at the start | Check the lock switch, free space and read-only state |
 | Write error partway | The card is failing or was removed |
 | Very slow speeds | Try another USB port or reader, avoid hubs and USB 2.0 readers |
 | Leftover `SDCHK_*.bin` | Delete them manually |
 
-## 10. Limits
+## 11. Limits
 
 - SD cards have no S.M.A.R.T. data. USB readers usually hide the CID/CSD registers.
 - Quick mode cannot prove full advertised capacity. Only Full can.
 - Speed depends on the reader and port as well as the card.
 - A pass is strong evidence for today, not a guarantee. Keep backups.
 
-## 11. Quick-start checklist
+## 12. Quick-start checklist
 
 1. Install Python with Add to PATH.
 2. Copy `SDCardChecker.py` to `D:\Claude`.
