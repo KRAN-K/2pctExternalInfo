@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 r"""
-2%SDinfo  v1.3  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
+2%SDinfo  v1.4  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
 
-GUI:   python 2pctSDinfo_v1.3.py
-CLI:   python 2pctSDinfo_v1.3.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
+GUI:   python 2pctSDinfo_v1.4.py
+CLI:   python 2pctSDinfo_v1.4.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
 
 What it does
   1. CARD INFO      label, filesystem, size, free space, serial, reader/bus type, model,
@@ -41,12 +41,16 @@ IS_WIN = sys.platform.startswith("win")
 # App identity and version history  (add a new entry at the TOP of CHANGELOG for each release)
 # ----------------------------------------------------------------------------
 APP_NAME = "2%SDinfo"
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 APP_TAG = "v" + APP_VERSION
 APP_TITLE = f"{APP_NAME} {APP_TAG}"
 APP_TAGLINE = "SD card & USB drive checker, disk imager and deleted-file recovery"
 APP_REPO = "https://github.com/KRAN-K/2pctExternalInfo"
 CHANGELOG = [
+    ("1.4", "2026-11-19", [
+        "Theme dropdown replaces the dark-mode checkbox: Light, Dark, Dark Gray, Crimson Eclipse (black and red), Deep Ocean (navy and cyan)",
+        "Chosen theme is remembered between launches",
+    ]),
     ("1.3", "2026-11-19", [
         "Renamed to 2%SDinfo; version shown in the title, reports and file name",
         "About tab with version history and system details",
@@ -1282,9 +1286,15 @@ def save_settings(d):
 
 
 THEMES = {
-    "light": None,
-    "dark": {"bg": "#1e1f22", "fg": "#e6e6e6", "field": "#2b2d30", "btn": "#3a3d41", "btn_hi": "#4a4e54",
+    "Light": None,
+    "Dark": {"bg": "#1e1f22", "fg": "#e6e6e6", "field": "#2b2d30", "btn": "#3a3d41", "btn_hi": "#4a4e54",
              "accent": "#3b82c4", "warn": "#ff7b72", "ok": "#5fd47f", "dim": "#9aa0a6", "border": "#43464b"},
+    "Dark Gray": {"bg": "#2d2d2d", "fg": "#ececec", "field": "#3a3a3a", "btn": "#4a4a4a", "btn_hi": "#5c5c5c",
+                  "accent": "#7a8794", "warn": "#ff8a80", "ok": "#8bd48b", "dim": "#ababab", "border": "#5a5a5a"},
+    "Crimson Eclipse": {"bg": "#0a0a0a", "fg": "#f2e9e9", "field": "#160c0c", "btn": "#2a0d0d", "btn_hi": "#4d1313",
+                        "accent": "#d0021b", "warn": "#ff4d4d", "ok": "#ffd166", "dim": "#a77a7a", "border": "#5c1616"},
+    "Deep Ocean": {"bg": "#0b1e2d", "fg": "#dff3ff", "field": "#102a3d", "btn": "#16405a", "btn_hi": "#1f5a7d",
+                   "accent": "#00a8cc", "warn": "#ff8fa3", "ok": "#7be0b0", "dim": "#7fa8c0", "border": "#1e4a66"},
 }
 
 
@@ -1842,9 +1852,10 @@ def run_gui():
             atxt.insert("end", f"   • {ln_}\n")
     atxt.config(state="disabled")
 
-    # ---------------- Devices panel (right) + dark mode ----------------
+    # ---------------- Devices panel (right) + themes ----------------
     settings = load_settings()
-    dark_var = tk.BooleanVar(value=bool(settings.get("dark")))
+    theme0 = settings.get("theme") or ("Dark" if settings.get("dark") else "Light")
+    theme_var = tk.StringVar(value=theme0 if theme0 in THEMES else "Light")
     style = ttk.Style()
     orig_theme = style.theme_use()
     text_widgets = [txt, rtxt, itxt, atxt]
@@ -1853,7 +1864,7 @@ def run_gui():
                  "warn": "#b00020", "ok": "#1b7f3b", "dim": "#666666", "accent": "#3b82c4", "border": "#a0a0a0"}
 
     def apply_theme():
-        p = THEMES["dark"] if dark_var.get() else None
+        p = THEMES.get(theme_var.get())
         if p:
             style.theme_use("clam")
             style.configure(".", background=p["bg"], foreground=p["fg"], fieldbackground=p["field"],
@@ -1894,20 +1905,24 @@ def run_gui():
         tree.tag_configure("usb", foreground=pal["ok"])
         tree.tag_configure("sys", foreground=pal["warn"])
         tree.tag_configure("fix", foreground=pal["fg"])
-        for c in (combo, rcombo, icombo):                       # drop-down list colours
+        for c in (combo, rcombo, icombo, tcombo):               # drop-down list colours
             try:
                 c.tk.eval("set pd [ttk::combobox::PopdownWindow %s]; $pd.f.l configure -background %s "
                           "-foreground %s -selectbackground %s" % (c, pal["field"], pal["fg"], pal["accent"]))
             except tk.TclError:
                 pass
-        settings["dark"] = dark_var.get()
+        settings["theme"] = theme_var.get()
+        settings.pop("dark", None)
         save_settings(settings)
 
     # --- devices tree
     hdr = ttk.Frame(right, padding=(8, 8, 8, 0))
     hdr.pack(fill="x")
     ttk.Label(hdr, text="Available devices", font=("Segoe UI", 11, "bold")).pack(side="left")
-    ttk.Checkbutton(hdr, text="Dark mode", variable=dark_var, command=lambda: apply_theme()).pack(side="right")
+    tcombo = ttk.Combobox(hdr, textvariable=theme_var, values=list(THEMES), state="readonly", width=15)
+    tcombo.pack(side="right")
+    tcombo.bind("<<ComboboxSelected>>", lambda e: (apply_theme(), tcombo.selection_clear()))
+    ttk.Label(hdr, text="Theme:").pack(side="right", padx=(0, 4))
     tree = ttk.Treeview(right, columns=("info", "size"), height=16, selectmode="browse")
     tree.heading("#0", text="Device")
     tree.heading("info", text="Bus / FS")
