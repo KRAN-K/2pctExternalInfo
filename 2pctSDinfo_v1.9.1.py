@@ -1,10 +1,10 @@
 # NEED PYTHON? Download the Windows installer here (copy and paste into your browser): https://www.python.org/downloads/windows/
 # On the first installer screen tick "Add python.exe to PATH", click Install Now, then double-click this file (2pctSDinfo).
 r"""
-2%SDinfo  v1.9  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
+2%SDinfo  v1.9.1  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
 
-GUI:   python 2pctSDinfo_v1.9.py
-CLI:   python 2pctSDinfo_v1.9.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
+GUI:   python 2pctSDinfo_v1.9.1.py
+CLI:   python 2pctSDinfo_v1.9.1.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
 
 What it does
   1. CARD INFO      label, filesystem, size, free space, serial, reader/bus type, model,
@@ -42,12 +42,15 @@ IS_WIN = sys.platform.startswith("win")
 # App identity and version history  (add a new entry at the TOP of CHANGELOG for each release)
 # ----------------------------------------------------------------------------
 APP_NAME = "2%SDinfo"
-APP_VERSION = "1.9"
+APP_VERSION = "1.9.1"
 APP_TAG = "v" + APP_VERSION
 APP_TITLE = f"{APP_NAME} {APP_TAG}"
 APP_TAGLINE = "SD card & USB drive checker, disk imager and deleted-file recovery"
 APP_REPO = "https://github.com/KRAN-K/2pctExternalInfo"
 CHANGELOG = [
+    ("1.9.1", "2026-11-23", [
+        "Fix: Partitions tab - the confirm box for Format / Delete showed nothing to type on partitions without a drive letter (such as a Raspberry Pi card's Linux partitions). It now asks for the partition number",
+    ]),
     ("1.9", "2026-11-19", [
         "Pi tab: new 'Android-based systems' folder - every Android / LineageOS / AOSP / Bass OS image found in Raspberry Pi's own list, plus KonstaKANG (LineageOS, AOSP, Android TV) and emteria.OS",
         "Android images that are only offered on a project web page get an 'Open download page' button; save the .zip, then pick it with 'Use own image file'",
@@ -1389,6 +1392,8 @@ def list_partitions(number):
     if isinstance(parts, dict):
         parts = [parts]
     parts = sorted(parts, key=lambda p: p.get("Offset") or 0)
+    for p in parts:                                  # Windows reports "no letter" as an invisible NUL character
+        p["Letter"] = re.sub(r"[^A-Za-z]", "", str(p.get("Letter") or ""))[:1].upper()
     info["Partitions"] = parts
     info["Sector"] = info.get("Sector") or 512
     size = info.get("Size") or 0
@@ -2968,7 +2973,7 @@ def run_gui():
         return out if out.get("_ok") else None
 
     def confirm_typed(what, expected):
-        a = simpledialog.askstring(APP_NAME, "%s\n\nType  %s  to confirm:" % (what, expected), parent=root)
+        a = simpledialog.askstring(APP_NAME, "%s\n\nType  %s  to confirm:" % (what, str(expected).strip() or "?"), parent=root)
         return bool(a) and a.strip().upper().rstrip(":") == str(expected).upper()
 
     # --- running operations

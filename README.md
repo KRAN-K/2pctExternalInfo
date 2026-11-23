@@ -1,4 +1,4 @@
-# 2%SDinfo v1.9
+# 2%SDinfo v1.9.1
 
 A single-file Windows tool (Python 3.9+, standard library only) that checks micro SD cards and USB drives, and can recover accidentally deleted files.
 
@@ -21,12 +21,12 @@ Icon files (PNG and .ico, for shortcuts) are in the `assets` folder.
 
 ## Quick start
 
-Double-click **`2pctSDinfo_v1.9.py`** (needs Python 3.9+ with Tkinter, from python.org with "Add to PATH" ticked). The console hides itself and Windows asks for administrator rights, which recovery and the imager need.
+Double-click **`2pctSDinfo_v1.9.1.py`** (needs Python 3.9+ with Tkinter, from python.org with "Add to PATH" ticked). The console hides itself and Windows asks for administrator rights, which recovery and the imager need.
 
 Or from a terminal:
 
 ```
-python 2pctSDinfo_v1.9.py
+python 2pctSDinfo_v1.9.1.py
 ```
 
 Add `--no-admin` to skip the administrator prompt.
@@ -34,19 +34,20 @@ Add `--no-admin` to skip the administrator prompt.
 Command line:
 
 ```
-python 2pctSDinfo_v1.9.py --cli E:\ --mode quick --report report.txt
-python 2pctSDinfo_v1.9.py --image E:\ D:\Claude\card.img
-python 2pctSDinfo_v1.9.py --recover D:\Claude\card.img --out D:\Claude\Recovered
-python 2pctSDinfo_v1.9.py --format E:\ --fs FAT32 --label MYCARD
-python 2pctSDinfo_v1.9.py --eject E:\
+python 2pctSDinfo_v1.9.1.py --cli E:\ --mode quick --report report.txt
+python 2pctSDinfo_v1.9.1.py --image E:\ D:\Claude\card.img
+python 2pctSDinfo_v1.9.1.py --recover D:\Claude\card.img --out D:\Claude\Recovered
+python 2pctSDinfo_v1.9.1.py --format E:\ --fs FAT32 --label MYCARD
+python 2pctSDinfo_v1.9.1.py --eject E:\
 ```
 
 ## Versions
 
-Versions are written v1.0, v1.1, v1.2, v1.3 ... The current file is `2pctSDinfo_v1.9.py`. To release a new version: change `APP_VERSION`, add an entry at the top of `CHANGELOG` (it appears on the About tab), rename the file to match, and update the docs. Extra About-tab sections can be added to `ABOUT_EXTRA`.
+Versions are written v1.0, v1.1, v1.2, v1.3 ... The current file is `2pctSDinfo_v1.9.1.py`. To release a new version: change `APP_VERSION`, add an entry at the top of `CHANGELOG` (it appears on the About tab), rename the file to match, and update the docs. Extra About-tab sections can be added to `ABOUT_EXTRA`.
 
 | Version | Highlights |
 |---|---|
+| v1.9.1 | Fix: Format / Delete confirmation on partitions without a drive letter |
 | v1.9 | Pi tab: Android-based systems folder (Android / LineageOS / AOSP / Bass OS / KonstaKANG / emteria) |
 | v1.8 | New icon; Pi tab: Update list now button and your own OS list |
 | v1.7 | New Pi tab: Raspberry Pi OS list, download, write, first-boot setup |
