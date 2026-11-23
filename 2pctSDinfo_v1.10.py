@@ -1,10 +1,10 @@
 # NEED PYTHON? Download the Windows installer here (copy and paste into your browser): https://www.python.org/downloads/windows/
 # On the first installer screen tick "Add python.exe to PATH", click Install Now, then double-click this file (2pctSDinfo).
 r"""
-2%SDinfo  v1.9.1  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
+2%SDinfo  v1.10  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
 
-GUI:   python 2pctSDinfo_v1.9.1.py
-CLI:   python 2pctSDinfo_v1.9.1.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
+GUI:   python 2pctSDinfo_v1.10.py
+CLI:   python 2pctSDinfo_v1.10.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
 
 What it does
   1. CARD INFO      label, filesystem, size, free space, serial, reader/bus type, model,
@@ -42,12 +42,16 @@ IS_WIN = sys.platform.startswith("win")
 # App identity and version history  (add a new entry at the TOP of CHANGELOG for each release)
 # ----------------------------------------------------------------------------
 APP_NAME = "2%SDinfo"
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.10"
 APP_TAG = "v" + APP_VERSION
 APP_TITLE = f"{APP_NAME} {APP_TAG}"
 APP_TAGLINE = "SD card & USB drive checker, disk imager and deleted-file recovery"
 APP_REPO = "https://github.com/KRAN-K/2pctExternalInfo"
 CHANGELOG = [
+    ("1.10", "2026-11-23", [
+        "Pi tab: SSH key box can now fill itself - 'Get from GitHub' downloads a user's public keys from github.com/<name>.keys, 'Use this PC's key' reads your existing key or makes a new one",
+        "Pi tab: the SSH key box holds several keys (one per line)",
+    ]),
     ("1.9.1", "2026-11-23", [
         "Fix: Partitions tab - the confirm box for Format / Delete showed nothing to type on partitions without a drive letter (such as a Raspberry Pi card's Linux partitions). It now asks for the partition number",
     ]),
@@ -2018,12 +2022,14 @@ def pi_userdata(o, rpi=True):
         L.append("timezone: " + _q(o["timezone"]))
     if o.get("keymap"):
         L += ["keyboard:", "  model: pc105", "  layout: " + _q(o["keymap"])]
-    if o.get("username") and o.get("password"):
+    keys = [k.strip() for k in (o.get("ssh_keys") or "").splitlines() if k.strip()]
+    if o.get("username") and (o.get("password") or keys):
         L += ["users:", "  - name: " + _q(o["username"]),
               "    groups: users,adm,dialout,audio,netdev,video,plugdev,cdrom,games,input,gpio,spi,i2c,render,sudo",
-              "    shell: /bin/bash", "    lock_passwd: false", "    passwd: " + _q(sha512_crypt(o["password"])),
-              "    sudo: ALL=(ALL) NOPASSWD:ALL"]
-        keys = [k.strip() for k in (o.get("ssh_keys") or "").splitlines() if k.strip()]
+              "    shell: /bin/bash", "    lock_passwd: " + ("false" if o.get("password") else "true")]
+        if o.get("password"):
+            L.append("    passwd: " + _q(sha512_crypt(o["password"])))
+        L.append("    sudo: ALL=(ALL) NOPASSWD:ALL")
         if keys:
             L.append("    ssh_authorized_keys:")
             L += ["      - " + _q(k) for k in keys]
@@ -2157,6 +2163,49 @@ def pi_find_boot(disk_number, timeout=40, log=print):
                 log("Could not mount the boot partition automatically: %s" % e)
         time.sleep(2)
     return None
+
+
+def pi_fetch_keys(user, base="https://github.com"):
+    """Public SSH keys of a GitHub (or GitLab-style) account: <base>/<user>.keys"""
+    user = user.strip().lstrip("@")
+    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", user):
+        raise ValueError("That does not look like a GitHub user name.")
+    try:
+        txt = pi_http_get("%s/%s.keys" % (base, user), timeout=15).decode("utf-8", "ignore")
+    except Exception as e:
+        if "404" in str(e):
+            raise RuntimeError("No GitHub user called '%s'." % user)
+        raise RuntimeError("Could not reach GitHub: %s" % e)
+    keys = [l.strip() for l in txt.splitlines() if re.match(r"^(ssh-|ecdsa-|sk-)", l.strip())]
+    if not keys:
+        raise RuntimeError("'%s' exists but has no public SSH keys on GitHub (add one at github.com/settings/keys)." % user)
+    return keys
+
+
+def pi_local_pubkey(generate=True, log=print):
+    """This PC's public key (~/.ssh/id_ed25519.pub or id_rsa.pub); makes an ed25519 key if there is none."""
+    d = os.path.join(os.path.expanduser("~"), ".ssh")
+    for n in ("id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"):
+        f = os.path.join(d, n)
+        if os.path.isfile(f):
+            with open(f, encoding="utf-8", errors="ignore") as fh:
+                k = fh.read().strip()
+            if k:
+                return k, "existing key " + f
+    if not generate:
+        raise RuntimeError("No key found in " + d)
+    import subprocess
+    os.makedirs(d, exist_ok=True)
+    priv = os.path.join(d, "id_ed25519")
+    try:
+        r = subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "2pctSDinfo", "-f", priv],
+                           capture_output=True, text=True, timeout=60, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except FileNotFoundError:
+        raise RuntimeError("ssh-keygen was not found. On Windows turn on Settings > Apps > Optional features > OpenSSH Client.")
+    if r.returncode != 0 or not os.path.isfile(priv + ".pub"):
+        raise RuntimeError("ssh-keygen failed: " + (r.stderr or r.stdout).strip()[:200])
+    with open(priv + ".pub", encoding="utf-8") as fh:
+        return fh.read().strip(), "NEW key made at " + priv + " (keep that private file safe)"
 
 
 PI_SETTING_KEYS = ("hostname", "username", "wifi_ssid", "wifi_country", "timezone", "keymap", "ssh", "ssh_pw",
@@ -3285,7 +3334,7 @@ def run_gui():
     bv = lambda k, d=False: tk.BooleanVar(value=pi_saved.get(k, d))
     p_host, p_user, p_pass = sv("hostname", "raspberrypi"), sv("username", "pi"), tk.StringVar()
     p_ssid, p_wpass, p_cc = sv("wifi_ssid"), tk.StringVar(), sv("wifi_country", "US")
-    p_tz, p_km, p_key = sv("timezone", "America/Boise"), sv("keymap", "us"), sv("ssh_keys")
+    p_tz, p_km = sv("timezone", "America/Boise"), sv("keymap", "us")
     p_on, p_ssh, p_sshpw = bv("on", True), bv("ssh", True), bv("ssh_pw", True)
     p_hid, p_spi, p_i2c, p_ser, p_ow = bv("wifi_hidden"), bv("spi"), bv("i2c"), bv("serial"), bv("onewire")
     p_verify = tk.BooleanVar(value=True)
@@ -3312,7 +3361,13 @@ def run_gui():
     ttk.Checkbutton(sf, text="Enable SSH", variable=p_ssh).grid(row=4, column=0, columnspan=2, sticky="w")
     ttk.Checkbutton(sf, text="Allow SSH password login", variable=p_sshpw).grid(row=4, column=2, columnspan=2, sticky="w", padx=(14, 0))
     ttk.Label(sf, text="SSH public key").grid(row=5, column=0, sticky="w")
-    ttk.Entry(sf, textvariable=p_key, width=64).grid(row=5, column=1, columnspan=5, sticky="we", padx=4, pady=1)
+    pkey = tk.Text(sf, height=2, width=52, font=("Consolas", 9), wrap="char")
+    pkey.grid(row=5, column=1, columnspan=3, sticky="we", padx=4, pady=1)
+    pkey.insert("1.0", pi_saved.get("ssh_keys", ""))
+    pkb = ttk.Frame(sf)
+    pkb.grid(row=5, column=4, columnspan=2, sticky="w", padx=4)
+    ttk.Button(pkb, text="From GitHub...", command=lambda: pi_key_github()).pack(side="left")
+    ttk.Button(pkb, text="This PC's key", command=lambda: pi_key_local()).pack(side="left", padx=4)
     pif = ttk.Frame(sf)
     pif.grid(row=6, column=0, columnspan=6, sticky="w")
     ttk.Label(pif, text="Enable interfaces:").pack(side="left")
@@ -3339,11 +3394,42 @@ def run_gui():
         pitxt.insert("end", m + "\n")
         pitxt.see("end")
 
+    def pi_set_keys(keys):
+        pkey.delete("1.0", "end")
+        pkey.insert("1.0", "\n".join(keys))
+        p_ssh.set(True)
+
+    def pi_key_github():
+        u = simpledialog.askstring("Get SSH key", "GitHub user name (your public keys are read from\n"
+                                   "https://github.com/<name>.keys):", parent=root, initialvalue=pi_saved.get("gh_user", ""))
+        if not u:
+            return
+        try:
+            keys = pi_fetch_keys(u)
+        except Exception as e:
+            messagebox.showerror("Get SSH key", str(e))
+            return
+        pi_set_keys(keys)
+        pi_saved["gh_user"] = u.strip()
+        s_ = load_settings()
+        s_.setdefault("pi", {})["gh_user"] = u.strip()
+        save_settings(s_)
+        pilog("Loaded %d public key(s) from github.com/%s" % (len(keys), u.strip()))
+
+    def pi_key_local():
+        try:
+            k, how = pi_local_pubkey(True, pilog)
+        except Exception as e:
+            messagebox.showerror("SSH key", str(e))
+            return
+        pi_set_keys([k])
+        pilog("Using " + how)
+
     def pi_opts():
         o = {"hostname": p_host.get().strip(), "username": p_user.get().strip(), "password": p_pass.get(),
              "wifi_ssid": p_ssid.get(), "wifi_pass": p_wpass.get(), "wifi_country": p_cc.get().strip(),
              "wifi_hidden": p_hid.get(), "timezone": p_tz.get().strip(), "keymap": p_km.get().strip(),
-             "ssh": p_ssh.get(), "ssh_pw": p_sshpw.get(), "ssh_keys": p_key.get().strip(),
+             "ssh": p_ssh.get(), "ssh_pw": p_sshpw.get(), "ssh_keys": pkey.get("1.0", "end").strip(),
              "spi": p_spi.get(), "i2c": p_i2c.get(), "serial": p_ser.get(), "onewire": p_ow.get()}
         return o
 
@@ -3353,6 +3439,7 @@ def run_gui():
         d = {k: o[k] for k in PI_SETTING_KEYS if k in o}      # passwords are never saved
         d["on"] = p_on.get()
         d["repo"] = p_repo.get().strip()
+        d["gh_user"] = pi_saved.get("gh_user", "")
         s_["pi"] = d
         save_settings(s_)
 
@@ -3361,8 +3448,10 @@ def run_gui():
             return None
         if o["hostname"] and not re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?", o["hostname"]):
             return "Hostname may only use letters, digits and hyphens."
-        if bool(o["username"]) != bool(o["password"]):
-            return "Enter both a username and a password (or leave both empty)."
+        if o["password"] and not o["username"]:
+            return "Enter a username for that password."
+        if o["username"] and not o["password"] and not o["ssh_keys"]:
+            return "Enter a password or an SSH key for that username (or leave the username empty)."
         if o["username"] and not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", o["username"]):
             return "Username must be lowercase letters/digits (start with a letter)."
         if o["wifi_ssid"] and o["wifi_pass"] and not (8 <= len(o["wifi_pass"]) <= 63):
@@ -3617,7 +3706,7 @@ def run_gui():
     theme_var = tk.StringVar(value=theme0 if theme0 in THEMES else "Light")
     style = ttk.Style()
     orig_theme = style.theme_use()
-    text_widgets = [txt, rtxt, itxt, atxt, ptxt, pitxt]
+    text_widgets = [txt, rtxt, itxt, atxt, ptxt, pitxt, pkey]
     warn_labels = [warn, iwarn, piwarn]
     pal_light = {"bg": style.lookup("TFrame", "background") or "#f0f0f0", "fg": "#000000", "field": "#ffffff",
                  "warn": "#b00020", "ok": "#1b7f3b", "dim": "#666666", "accent": "#3b82c4", "border": "#a0a0a0"}
