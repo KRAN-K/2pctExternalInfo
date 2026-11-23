@@ -1,10 +1,10 @@
 # NEED PYTHON? Download the Windows installer here (copy and paste into your browser): https://www.python.org/downloads/windows/
 # On the first installer screen tick "Add python.exe to PATH", click Install Now, then double-click this file (2pctSDinfo).
 r"""
-2%SDinfo  v1.10  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
+2%SDinfo  v1.11  -  Micro SD / SD card / USB drive checker, imager and recovery tool (Windows).
 
-GUI:   python 2pctSDinfo_v1.10.py
-CLI:   python 2pctSDinfo_v1.10.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
+GUI:   python 2pctSDinfo_v1.11.py
+CLI:   python 2pctSDinfo_v1.11.py --cli E:\ --mode quick|full [--size MB] [--report out.txt]
 
 What it does
   1. CARD INFO      label, filesystem, size, free space, serial, reader/bus type, model,
@@ -42,12 +42,17 @@ IS_WIN = sys.platform.startswith("win")
 # App identity and version history  (add a new entry at the TOP of CHANGELOG for each release)
 # ----------------------------------------------------------------------------
 APP_NAME = "2%SDinfo"
-APP_VERSION = "1.10"
+APP_VERSION = "1.11"
 APP_TAG = "v" + APP_VERSION
 APP_TITLE = f"{APP_NAME} {APP_TAG}"
 APP_TAGLINE = "SD card & USB drive checker, disk imager and deleted-file recovery"
 APP_REPO = "https://github.com/KRAN-K/2pctExternalInfo"
 CHANGELOG = [
+    ("1.11", "2026-11-23", [
+        "Partitions tab: 'Set Disk Offline' / 'Set Disk Online' buttons, like Disk Management - an offline disk disappears from Windows (and stays safe from other programs) until you bring it back",
+        "Devices panel: offline disks are marked '(offline)'; right-click menu has Set offline / Set online",
+        "While a disk is offline the destructive buttons (format, delete, clean, wipe...) are switched off",
+    ]),
     ("1.10", "2026-11-23", [
         "Pi tab: SSH key box can now fill itself - 'Get from GitHub' downloads a user's public keys from github.com/<name>.keys, 'Use this PC's key' reads your existing key or makes a new one",
         "Pi tab: the SSH key box holds several keys (one per line)",
@@ -1266,7 +1271,7 @@ foreach($d in (Get-Disk)){
     $v=Get-Volume -DriveLetter $p.DriveLetter
     $vols+=[pscustomobject]@{Letter="$($p.DriveLetter)";Label=$v.FileSystemLabel;FS=$v.FileSystem;Size=$v.Size;Free=$v.SizeRemaining}
   }
-  $res+=[pscustomobject]@{Number=$d.Number;Name=$d.FriendlyName;Bus="$($d.BusType)";Size=$d.Size;Style="$($d.PartitionStyle)";Health="$($d.HealthStatus)";System=[bool]($d.IsSystem -or $d.IsBoot);Volumes=$vols}
+  $res+=[pscustomobject]@{Number=$d.Number;Name=$d.FriendlyName;Offline=[bool]$d.IsOffline;Bus="$($d.BusType)";Size=$d.Size;Style="$($d.PartitionStyle)";Health="$($d.HealthStatus)";System=[bool]($d.IsSystem -or $d.IsBoot);Volumes=$vols}
 }
 ConvertTo-Json -InputObject $res -Depth 4 -Compress
 """
@@ -1373,6 +1378,7 @@ def clean_label(label, fs):
 
 
 PS_PARTS = r"""
+$ErrorActionPreference='SilentlyContinue'
 $n={N}
 $d=Get-Disk -Number $n
 $out=@()
@@ -1398,6 +1404,8 @@ def list_partitions(number):
     parts = sorted(parts, key=lambda p: p.get("Offset") or 0)
     for p in parts:                                  # Windows reports "no letter" as an invisible NUL character
         p["Letter"] = re.sub(r"[^A-Za-z]", "", str(p.get("Letter") or ""))[:1].upper()
+    if info.get("Offline"):
+        parts = []                                    # Windows cannot show the contents of an offline disk
     info["Partitions"] = parts
     info["Sector"] = info.get("Sector") or 512
     size = info.get("Size") or 0
@@ -1409,7 +1417,9 @@ def list_partitions(number):
             segs.append({"kind": "free", "offset": pos, "size": off - pos})
         segs.append({"kind": "part", "offset": off, "size": ln, "part": p})
         pos = max(pos, off + ln)
-    if not parts and size:
+    if info.get("Offline"):
+        pass
+    elif not parts and size:
         segs.append({"kind": "free", "offset": 1024 * 1024 if size > 2 * 1024 * 1024 else 0, "size": size - 1024 * 1024})
     elif tail - pos >= 4 * 1024 * 1024:
         segs.append({"kind": "free", "offset": pos, "size": tail - pos})
@@ -1599,6 +1609,21 @@ def op_label(letter, label, fs):
 
 def op_letter(disk, part, new_letter):
     run_ps("Set-Partition -DiskNumber %d -PartitionNumber %d -NewDriveLetter %s" % (disk, part["Number"], new_letter))
+
+
+def op_set_online(disk, online):
+    """Disk Management's Online / Offline for one disk."""
+    if online:
+        run_ps("Set-Disk -Number %d -IsOffline $false" % disk)
+        time.sleep(2)
+        try:
+            if run_ps("(Get-Disk -Number %d).IsReadOnly" % disk).strip().lower() == "true":
+                return "online, but Windows marks it read-only (check the lock switch on the card / adapter)"
+        except RuntimeError:
+            pass
+        return "disk %d is online" % disk
+    run_ps("Set-Disk -Number %d -IsOffline $true" % disk)
+    return "disk %d is offline - it is hidden from Windows until you set it online again" % disk
 
 
 def op_initialize(disk, style):
@@ -3214,6 +3239,21 @@ def run_gui():
     def cmd_eject():
         eject_selected(pstate["disk"])
 
+    def cmd_online(go_online=None):
+        n = need_safe()
+        if n is None:
+            return
+        off = bool((pstate["info"] or {}).get("Offline"))
+        if go_online is None:
+            go_online = off
+        if go_online == (not off):
+            return messagebox.showinfo(APP_NAME, "Disk %d is already %s." % (n, "online" if go_online else "offline"))
+        if not go_online and not messagebox.askyesno(
+                APP_NAME, "Take disk %d offline?\n\nIts drive letters disappear from Windows and nothing can read or write "
+                          "it until you set it online again here.\n\nMake sure nothing is copying to it." % n):
+            return
+        run_op("Set disk %d %s" % (n, "online" if go_online else "offline"), lambda lg, pg: op_set_online(n, go_online))
+
     # --- sidebar
     sbtn = {}
 
@@ -3236,6 +3276,8 @@ def run_gui():
     sb("init", "Initialize Disk (MBR/GPT)...", cmd_init)
     sb("clean", "Clean Disk...", cmd_clean)
     sb("wipe", "Wipe Disk (zero fill)...", cmd_wipe)
+    sb("online", "Set Disk Online", lambda: cmd_online(True))
+    sb("offline", "Set Disk Offline...", lambda: cmd_online(False))
     sb("eject", "Eject Disk", cmd_eject)
     sect("")
     sb("refresh", "Refresh", lambda: (dev_wake.set(), load_disk()))
@@ -3249,6 +3291,9 @@ def run_gui():
         sg = sel_seg()
         pt = sg["part"] if sg and sg["kind"] == "part" else None
         has_parts = bool(info.get("Partitions"))
+        is_off = bool(info.get("Offline"))
+        safe_all = safe
+        safe = safe and not is_off                     # no destructive operations on an offline disk
         raw = str(info.get("Style", "")).upper() in ("RAW", "") and not has_parts
 
         def en(name, cond):
@@ -3263,7 +3308,9 @@ def run_gui():
         en("init", safe and not has_parts)
         en("clean", safe and has_parts)
         en("wipe", safe)
-        en("eject", safe)
+        en("online", safe_all and is_off)
+        en("offline", safe_all and not is_off)
+        en("eject", safe_all)
         en("refresh", True)
 
     ppoll()
@@ -3806,7 +3853,7 @@ def run_gui():
             usb = str(d.get("Bus", "")).upper() in SAFE_BUS and not d.get("System")
             tag = "sys" if d.get("System") else ("usb" if usb else "fix")
             top_id = tree.insert("", "end", iid="d%s" % d.get("Number"), open=True, tags=(tag,),
-                                 text="Disk %s  %s" % (d.get("Number"), d.get("Name") or ""),
+                                 text="Disk %s  %s%s" % (d.get("Number"), d.get("Name") or "", "  (offline)" if d.get("Offline") else ""),
                                  values=(d.get("Bus", ""), "%.1f GB" % ((d.get("Size") or 0) / 1e9)))
             for v in d.get("Volumes") or []:
                 tree.insert(top_id, "end", iid="v%s" % v.get("Letter"), tags=(tag,),
@@ -3927,6 +3974,7 @@ def run_gui():
 
     tmenu = tk.Menu(root, tearoff=0)
     tmenu.add_command(label="Eject", command=lambda: eject_selected())
+    tmenu.add_command(label="Set offline / online", command=lambda: (nb.select(ptab), follow_disk(tree_disk(), True), root.after(600, lambda: cmd_online(None))))
     tmenu.add_command(label="Manage partitions...", command=lambda: (nb.select(ptab), follow_disk(tree_disk(), True)))
 
     def tree_menu(e):
